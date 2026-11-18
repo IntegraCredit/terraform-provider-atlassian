@@ -4,6 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  # Release Please tags with GITHUB_TOKEN, and those tags start no workflows, so it calls this one.
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to build and release, for example v0.2.0
+        required: true
+        type: string
+    secrets:
+      GPG_PRIVATE_KEY:
+        required: true
+      GPG_PASSPHRASE:
+        required: true
 
 permissions:
   contents: write
@@ -15,27 +27,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
-      - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@v2
-        with:
-          export-env: true
-        env:
-          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          GPG_PRIVATE_KEY: op://terraform-provider-atlassian/terraform-atlassian-gpg/terraform-atlassian.pem
-          GPG_PASSPHRASE: op://terraform-provider-atlassian/terraform-atlassian-gpg/password
-
+      # The public half of this key is on the integracredit namespace in the Terraform
+      # Registry, which rejects a release signed with any other key.
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v6
         id: import_gpg
         with:
-          gpg_private_key: ${{ env.GPG_PRIVATE_KEY }}
-          passphrase: ${{ env.GPG_PASSPHRASE }}
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
       - uses: goreleaser/goreleaser-action@v7
         with:
