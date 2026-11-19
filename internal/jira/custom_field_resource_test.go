@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/testutil"
 )
@@ -65,6 +68,25 @@ func (s *customFieldState) apiResponse() map[string]interface{} {
 	}
 }
 
+// requireSearcherKeyExpand rejects a field search that does not expand searcherKey.
+// Jira returns searcherKey as null without it, so searcher_key would drift to "".
+func requireSearcherKeyExpand(w http.ResponseWriter, r *http.Request) bool {
+	if slices.Contains(strings.Split(r.URL.Query().Get("expand"), ","), "searcherKey") {
+		return true
+	}
+	http.Error(w, "expand=searcherKey is required", http.StatusBadRequest)
+	return false
+}
+
+// writeFieldSearch writes a GET /rest/api/3/field/search response with the given fields.
+func writeFieldSearch(w http.ResponseWriter, values ...map[string]interface{}) {
+	if values == nil {
+		values = []map[string]interface{}{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"values": values}) //nolint:errcheck
+}
+
 func newCustomFieldMockServer(state *customFieldState, readCount *atomic.Int32) *httptest.Server {
 	var deleted atomic.Int32
 
@@ -90,18 +112,19 @@ func newCustomFieldMockServer(state *customFieldState, readCount *atomic.Int32) 
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(state.apiResponse()) //nolint:errcheck
 
-		case r.Method == "GET" && r.URL.Path == "/rest/api/3/field":
+		case r.Method == "GET" && r.URL.Path == "/rest/api/3/field/search":
+			if !requireSearcherKeyExpand(w, r) {
+				return
+			}
 			if readCount != nil {
 				readCount.Add(1)
 			}
 			id, _, _, _, _ := state.get()
-			if id == "" || deleted.Load() > 0 {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]interface{}{}) //nolint:errcheck
+			if id == "" || deleted.Load() > 0 || r.URL.Query().Get("id") != id {
+				writeFieldSearch(w)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]interface{}{state.apiResponse()}) //nolint:errcheck
+			writeFieldSearch(w, state.apiResponse())
 
 		case r.Method == "PUT" && r.URL.Path == "/rest/api/3/field/"+testFieldID:
 			var body struct {
@@ -238,16 +261,17 @@ func TestAccCustomFieldResource_Read_NotFound(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(state.apiResponse()) //nolint:errcheck
 
-		case r.Method == "GET" && r.URL.Path == "/rest/api/3/field":
+		case r.Method == "GET" && r.URL.Path == "/rest/api/3/field/search":
+			if !requireSearcherKeyExpand(w, r) {
+				return
+			}
 			readCount.Add(1)
 			if readCount.Load() <= 1 {
 				// First read after create succeeds
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]interface{}{state.apiResponse()}) //nolint:errcheck
+				writeFieldSearch(w, state.apiResponse())
 			} else {
-				// Subsequent reads return empty list (deleted out-of-band)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]interface{}{}) //nolint:errcheck
+				// Subsequent reads return no fields (deleted out-of-band)
+				writeFieldSearch(w)
 			}
 
 		case r.Method == "DELETE" && r.URL.Path == "/rest/api/3/field/"+testFieldID:
@@ -358,12 +382,60 @@ func TestAccCustomFieldResource_WithSearcherKey(t *testing.T) {
 	})
 }
 
+// TestAccCustomFieldResource_SearcherKeyNoReplace verifies that Read keeps the
+// searcher key, so a plan after create does not replace the field.
+// Replacing a Jira custom field deletes every value stored in it.
+func TestAccCustomFieldResource_SearcherKeyNoReplace(t *testing.T) {
+	name := fmt.Sprintf("tf-test-%s", acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum))
+	state := &customFieldState{}
+
+	mockServer := newCustomFieldMockServer(state, nil)
+	defer mockServer.Close()
+
+	t.Setenv("ATLASSIAN_URL", mockServer.URL)
+	t.Setenv("ATLASSIAN_USER", "test@test.com")
+	t.Setenv("ATLASSIAN_TOKEN", "test-token")
+
+	config := fmt.Sprintf(`resource "atlassian_jira_custom_field" "test" {
+  name         = %q
+  type         = %q
+  searcher_key = %q
+}`, name, testFieldType, testFieldSearcher)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
+		CheckDestroy: func(s *terraform.State) error {
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+			},
+			{
+				RefreshState: true,
+				Check:        resource.TestCheckResourceAttr("atlassian_jira_custom_field.test", "searcher_key", testFieldSearcher),
+			},
+			{
+				Config: config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("atlassian_jira_custom_field.test", plancheck.ResourceActionNoop),
+					},
+				},
+			},
+		},
+	})
+}
+
 // TestAccCustomFieldDataSource_basic verifies looking up a custom field by name.
 func TestAccCustomFieldDataSource_basic(t *testing.T) {
 	name := fmt.Sprintf("tf-test-%s", acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum))
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && r.URL.Path == "/rest/api/3/field/search" {
+			if !requireSearcherKeyExpand(w, r) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 				"values": []map[string]interface{}{
@@ -420,6 +492,9 @@ func TestAccCustomFieldDataSource_NotFound(t *testing.T) {
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && r.URL.Path == "/rest/api/3/field/search" {
+			if !requireSearcherKeyExpand(w, r) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 				"values": []map[string]interface{}{},
@@ -451,6 +526,9 @@ func TestAccCustomFieldDataSource_AmbiguousName(t *testing.T) {
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" && r.URL.Path == "/rest/api/3/field/search" {
+			if !requireSearcherKeyExpand(w, r) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
 				"values": []map[string]interface{}{
