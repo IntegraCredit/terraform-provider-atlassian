@@ -226,6 +226,15 @@ func TestIntegration_preflight(t *testing.T) {
 }
 ```
 
+It also checks that the account has the Jira `ADMINISTER` permission and that the site has a permanent standard issue type (see below).
+
+## Test Site Setup
+
+The test site needs this once, outside the tests:
+
+- The test account is in the site's `jira-admins`, `confluence-admins` and `site-admins` groups. Only Jira admins manage schemes, workflows and custom fields, and only site admins create groups. Listing groups works without these, so a passing group listing proves nothing.
+- The site has a permanent standard issue type, such as `Task`. Jira refuses to delete the last standard issue type. Without a permanent one, a test that deletes its issue type fails on cleanup whenever no other test's issue type exists at that moment.
+
 ## Environment Variables
 
 | Variable | Required | Description |
