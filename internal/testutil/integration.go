@@ -12,7 +12,8 @@ import (
 // AllowedSweepHosts is the set of Jira instances that sweepers are allowed to operate on.
 // This prevents accidental sweeps against production instances.
 var AllowedSweepHosts = map[string]bool{
-	"lbajsarowicz.atlassian.net": true,
+	"lbajsarowicz.atlassian.net":            true, // upstream demo site
+	"provider-atlassian-test.atlassian.net": true, // fork's dedicated test site
 }
 
 // SkipIfNoConfluencePermissions skips the test unless ATLASSIAN_CONFLUENCE_PAID=1 is set.

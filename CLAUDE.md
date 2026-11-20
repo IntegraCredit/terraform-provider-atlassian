@@ -37,7 +37,7 @@ Provide a production-grade OpenTofu provider that enables declarative management
 
 ### Testing
 - Unit tests: mock HTTP server via `httptest.NewServer`
-- Acceptance tests: `TF_ACC=1`, run against demo Jira instance (`lbajsarowicz.atlassian.net`)
+- Acceptance tests: `TF_ACC=1`, run against the dedicated test site (`provider-atlassian-test.atlassian.net`); see `docs/spec/integration-tests.md`
 - All acceptance tests MUST have `CheckDestroy` function
 - Test resource names MUST be randomized (`acctest.RandStringFromCharSet`)
 - Mock servers MUST validate query parameters and request bodies

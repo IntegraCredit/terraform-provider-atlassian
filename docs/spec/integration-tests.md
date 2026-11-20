@@ -2,7 +2,7 @@
 
 ## Overview
 
-Integration tests run against the real Atlassian API (`lbajsarowicz.atlassian.net`). They live alongside existing mock tests as `*_integration_test.go` files in `internal/jira/`. They are gated on `TF_ACC=1` and use the `TestIntegration` prefix to avoid collision with existing `TestAcc` mock tests.
+Integration tests run against the real Atlassian API on a dedicated test site (`provider-atlassian-test.atlassian.net`). Never point them at a production site: they create and delete groups, projects, schemes and other configuration, and the sweepers delete anything named `tf-acc-test-*`. They live alongside existing mock tests as `*_integration_test.go` files in `internal/jira/`. They are gated on `TF_ACC=1` and use the `TestIntegration` prefix to avoid collision with existing `TestAcc` mock tests.
 
 ## Test File Structure
 
@@ -41,13 +41,14 @@ func SkipIfNoAcc(t *testing.T) {
     }
 }
 
-// AllowedHosts is the set of Jira instances that sweepers are allowed to operate on.
-var AllowedHosts = map[string]bool{
-    "lbajsarowicz.atlassian.net": true,
+// AllowedSweepHosts is the set of Jira instances that sweepers are allowed to operate on.
+var AllowedSweepHosts = map[string]bool{
+    "lbajsarowicz.atlassian.net":            true, // upstream demo site
+    "provider-atlassian-test.atlassian.net": true, // fork's dedicated test site
 }
 
 // SweepClient returns a real atlassian.Client using environment variables.
-// Validates that the target host is in the AllowedHosts allowlist and that
+// Validates that the target host is in the AllowedSweepHosts allowlist and that
 // ATLASSIAN_SWEEP_CONFIRM matches the hostname (for local safety).
 // In CI (GITHUB_ACTIONS=true), the confirmation env var is not required.
 func SweepClient() (*atlassian.Client, error) {
@@ -57,7 +58,7 @@ func SweepClient() (*atlassian.Client, error) {
     }
 
     host := extractHost(os.Getenv("ATLASSIAN_URL"))
-    if !AllowedHosts[host] {
+    if !AllowedSweepHosts[host] {
         return nil, fmt.Errorf("sweep aborted: host %q is not in the allowlist", host)
     }
 
@@ -201,7 +202,9 @@ Each sweeper function uses `context.WithTimeout(ctx, 2*time.Minute)` to prevent 
 
 ### Local safety
 
-Sweepers require `ATLASSIAN_SWEEP_CONFIRM=lbajsarowicz.atlassian.net` when run locally (outside GitHub Actions). This prevents accidental sweeps against a production instance if env vars are misconfigured. In CI (`GITHUB_ACTIONS=true`), the confirmation env var is not required.
+`SweepClient()` refuses any host that is not in `AllowedSweepHosts`, in CI and locally. Sweepers and every integration test's `CheckDestroy` go through it, so a test run against any other host fails.
+
+Locally (outside GitHub Actions), `SweepClient()` also requires `ATLASSIAN_SWEEP_CONFIRM=provider-atlassian-test.atlassian.net`. This prevents accidental sweeps against a production instance if env vars are misconfigured. In CI (`GITHUB_ACTIONS=true`), the confirmation env var is not required.
 
 ## Preflight Test
 
@@ -228,10 +231,11 @@ func TestIntegration_preflight(t *testing.T) {
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TF_ACC` | Yes | Set to `1` to enable integration tests |
-| `ATLASSIAN_URL` | Yes | e.g. `https://lbajsarowicz.atlassian.net` |
-| `ATLASSIAN_USER` | Yes | Account email |
-| `ATLASSIAN_TOKEN` | Yes | API token |
-| `ATLASSIAN_SWEEP_CONFIRM` | Local only | Must equal hostname to allow sweepers locally |
+| `ATLASSIAN_URL` | Yes | `https://provider-atlassian-test.atlassian.net`; the host must be in `AllowedSweepHosts` |
+| `ATLASSIAN_USER` | Yes | Email of an account with Jira admin rights on the test site |
+| `ATLASSIAN_TOKEN` | Yes | API token for that account |
+| `ATLASSIAN_SWEEP_CONFIRM` | Local only | Must equal the `ATLASSIAN_URL` host (`provider-atlassian-test.atlassian.net`) to allow sweepers and `CheckDestroy` locally |
+| `ATLASSIAN_CONFLUENCE_PAID` | No | Set to `1` to run the Confluence space permission tests, which need a paid Confluence plan. Not set in CI |
 | `GITHUB_RUN_ID` | CI auto-set | Used for resource run-ID tagging |
 | `GITHUB_ACTIONS` | CI auto-set | When `true`, skips sweep confirmation requirement |
 
@@ -248,15 +252,20 @@ Key decisions:
 ## Local Execution
 
 ```bash
-# Run all integration tests locally (requires env vars + sweep confirmation)
-export ATLASSIAN_SWEEP_CONFIRM=lbajsarowicz.atlassian.net
+# Point at the test site (never a production site)
+export ATLASSIAN_URL=https://provider-atlassian-test.atlassian.net
+export ATLASSIAN_USER=<admin email on the test site>
+export ATLASSIAN_TOKEN=<API token for that account>
+export ATLASSIAN_SWEEP_CONFIRM=provider-atlassian-test.atlassian.net
+
+# Run all integration tests locally
 TF_ACC=1 go test ./internal/jira/... -v -count=1 -timeout 30m -run '^TestIntegration'
 
 # Run integration tests for a specific resource
 TF_ACC=1 go test ./internal/jira/... -v -count=1 -run '^TestIntegrationGroupResource'
 
-# Run sweepers to clean up stale test resources (requires confirmation)
-ATLASSIAN_SWEEP_CONFIRM=lbajsarowicz.atlassian.net go test ./internal/jira/... -v -sweep=all -timeout 10m
+# Run sweepers to clean up stale test resources
+go test ./internal/jira/... -v -sweep=all -timeout 10m
 
 # Run mock tests only (default, no TF_ACC needed)
 go test ./internal/jira/... -v -count=1
