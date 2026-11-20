@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -166,11 +167,38 @@ func testDeleteGroupOutOfBand(resourceAddr string) resource.TestCheckFunc {
 		}
 		ctx := context.Background()
 		groupID := rs.Primary.Attributes["group_id"]
-		delPath := fmt.Sprintf("/rest/api/3/group?groupId=%s", atlassian.QueryEscape(groupID))
-		_, delErr := client.DeleteWithStatus(ctx, delPath)
-		if delErr != nil {
-			return fmt.Errorf("deleting group out-of-band: %w", delErr)
+		groupPath := fmt.Sprintf("/rest/api/3/group?groupId=%s", atlassian.QueryEscape(groupID))
+
+		// Jira's groups are eventually consistent. A group created a moment
+		// ago can answer DELETE with 404, which DeleteWithStatus treats as
+		// success, and a deleted group can still be returned by GET. Delete
+		// until GET agrees the group is gone, so the next refresh sees it gone.
+		deadline := time.Now().Add(groupDisappearTimeout)
+		for {
+			delStatus, delErr := client.DeleteWithStatus(ctx, groupPath)
+			if delErr != nil {
+				return fmt.Errorf("deleting group out-of-band: %w", delErr)
+			}
+
+			var result interface{}
+			getStatus, getErr := client.GetWithStatus(ctx, groupPath, &result)
+			if getErr != nil {
+				return fmt.Errorf("checking group after out-of-band delete: %w", getErr)
+			}
+			if getStatus == http.StatusNotFound {
+				return nil
+			}
+
+			if time.Now().After(deadline) {
+				return fmt.Errorf("group %s still exists %s after out-of-band delete (last DELETE status %d)",
+					groupID, groupDisappearTimeout, delStatus)
+			}
+			time.Sleep(groupDisappearPoll)
 		}
-		return nil
 	}
 }
+
+const (
+	groupDisappearTimeout = time.Minute
+	groupDisappearPoll    = 2 * time.Second
+)

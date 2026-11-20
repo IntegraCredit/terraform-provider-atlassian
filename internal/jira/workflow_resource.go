@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -40,30 +42,58 @@ type workflowResourceModel struct {
 
 // API request/response types
 
-// workflowCreateRequest represents the POST /rest/api/3/workflow request body.
-// Uses the legacy (non-versioned) workflow API which accepts status IDs directly.
+// workflowCreateRequest represents the POST /rest/api/3/workflows/create request body.
+// Jira removed the legacy POST /rest/api/3/workflow endpoint (it now answers 405).
 type workflowCreateRequest struct {
-	Name        string                    `json:"name"`
-	Description string                    `json:"description,omitempty"`
-	Statuses    []workflowStatusCreateRef `json:"statuses"`
-	Transitions []workflowTransitionRef   `json:"transitions"`
+	Scope     workflowScope          `json:"scope"`
+	Statuses  []workflowCreateStatus `json:"statuses"`
+	Workflows []workflowCreateItem   `json:"workflows"`
 }
 
-type workflowStatusCreateRef struct {
-	ID string `json:"id"`
-}
-
-type workflowTransitionRef struct {
-	Name string `json:"name"`
-	To   string `json:"to"`
+type workflowScope struct {
 	Type string `json:"type"`
 }
 
-// workflowCreateResponse represents the POST /rest/api/3/workflow response.
-// The old endpoint returns entityId at the top level (not nested under id).
+// workflowCreateStatus reuses an existing status. Jira requires name and
+// statusCategory even then, so they are sent as they are now, unchanged.
+type workflowCreateStatus struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	StatusCategory  string `json:"statusCategory"`
+	StatusReference string `json:"statusReference"`
+}
+
+type workflowCreateItem struct {
+	Name        string                     `json:"name"`
+	Description string                     `json:"description,omitempty"`
+	Statuses    []workflowCreateStatusRef  `json:"statuses"`
+	Transitions []workflowCreateTransition `json:"transitions"`
+}
+
+type workflowCreateStatusRef struct {
+	StatusReference string            `json:"statusReference"`
+	Properties      map[string]string `json:"properties"`
+}
+
+type workflowCreateTransition struct {
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	Type              string            `json:"type"`
+	ToStatusReference string            `json:"toStatusReference"`
+	Links             []interface{}     `json:"links"`
+	Actions           []interface{}     `json:"actions"`
+	Validators        []interface{}     `json:"validators"`
+	Triggers          []interface{}     `json:"triggers"`
+	Properties        map[string]string `json:"properties"`
+}
+
+// workflowCreateResponse represents the POST /rest/api/3/workflows/create response.
 type workflowCreateResponse struct {
-	EntityID string `json:"entityId"`
-	Name     string `json:"name"`
+	Workflows []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"workflows"`
 }
 
 type workflowAPIItem struct {
@@ -161,35 +191,107 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	statusRefs := make([]workflowStatusCreateRef, len(statusIDs))
-	for i, id := range statusIDs {
-		statusRefs[i] = workflowStatusCreateRef{ID: id}
+	statuses, err := r.getStatuses(ctx, statusIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading workflow statuses", err.Error())
+		return
 	}
 
-	// The legacy workflow API requires at least one initial transition.
-	// Create an initial transition pointing to the first status.
-	transitions := []workflowTransitionRef{
-		{Name: "Create", To: statusIDs[0], Type: "initial"},
-	}
-
-	body := workflowCreateRequest{
-		Name:        plan.Name.ValueString(),
-		Description: plan.Description.ValueString(),
-		Statuses:    statusRefs,
-		Transitions: transitions,
-	}
+	body := newWorkflowCreateRequest(plan.Name.ValueString(), plan.Description.ValueString(), statuses)
 
 	var result workflowCreateResponse
-	err := r.client.Post(ctx, "/rest/api/3/workflow", body, &result)
+	err = r.client.Post(ctx, "/rest/api/3/workflows/create", body, &result)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating workflow", err.Error())
 		return
 	}
 
+	if len(result.Workflows) != 1 || result.Workflows[0].ID == "" {
+		resp.Diagnostics.AddError("Error creating workflow",
+			fmt.Sprintf("expected one created workflow with an ID, got %d", len(result.Workflows)))
+		return
+	}
+
 	// Only take the ID from the response; preserve all other plan values.
-	plan.ID = types.StringValue(result.EntityID)
+	plan.ID = types.StringValue(result.Workflows[0].ID)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// statusLookupBatch is the most IDs GET /rest/api/3/statuses accepts in one call.
+const statusLookupBatch = 50
+
+// getStatuses fetches the given statuses in order. The create call needs each
+// status's name and category, not only its ID.
+func (r *workflowResource) getStatuses(ctx context.Context, ids []string) ([]statusAPIItem, error) {
+	byID := make(map[string]statusAPIItem, len(ids))
+	for batch := range slices.Chunk(ids, statusLookupBatch) {
+		query := make([]string, len(batch))
+		for i, id := range batch {
+			query[i] = "id=" + atlassian.QueryEscape(id)
+		}
+
+		var found []statusAPIItem
+		if err := r.client.Get(ctx, "/rest/api/3/statuses?"+strings.Join(query, "&"), &found); err != nil {
+			return nil, err
+		}
+		for _, s := range found {
+			byID[s.ID] = s
+		}
+	}
+
+	statuses := make([]statusAPIItem, len(ids))
+	for i, id := range ids {
+		s, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("status %q not found", id)
+		}
+		statuses[i] = s
+	}
+	return statuses, nil
+}
+
+// newWorkflowCreateRequest builds a global workflow that reuses existing
+// statuses. Each status's ID is its statusReference, which Jira accepts for
+// company-managed workflows. Like before, the only transition is the initial
+// one into the first status.
+func newWorkflowCreateRequest(name, description string, statuses []statusAPIItem) workflowCreateRequest {
+	createStatuses := make([]workflowCreateStatus, len(statuses))
+	statusRefs := make([]workflowCreateStatusRef, len(statuses))
+	for i, s := range statuses {
+		createStatuses[i] = workflowCreateStatus{
+			ID:              s.ID,
+			Name:            s.Name,
+			Description:     s.Description,
+			StatusCategory:  s.statusCategoryKey(),
+			StatusReference: s.ID,
+		}
+		statusRefs[i] = workflowCreateStatusRef{
+			StatusReference: s.ID,
+			Properties:      map[string]string{},
+		}
+	}
+
+	return workflowCreateRequest{
+		Scope:    workflowScope{Type: "GLOBAL"},
+		Statuses: createStatuses,
+		Workflows: []workflowCreateItem{{
+			Name:        name,
+			Description: description,
+			Statuses:    statusRefs,
+			Transitions: []workflowCreateTransition{{
+				ID:                "1",
+				Name:              "Create",
+				Type:              "INITIAL",
+				ToStatusReference: statuses[0].ID,
+				Links:             []interface{}{},
+				Actions:           []interface{}{},
+				Validators:        []interface{}{},
+				Triggers:          []interface{}{},
+				Properties:        map[string]string{},
+			}},
+		}},
+	}
 }
 
 func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -215,8 +317,8 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 	state.Description = types.StringValue(found.Description)
 
 	// Extract status IDs from the API response. Use the numeric ID (which
-	// matches what was sent to POST /rest/api/3/workflow on create) rather
-	// than StatusReference (a UUID assigned by the server).
+	// matches the status IDs in the configuration) rather than
+	// StatusReference (a UUID assigned by the server).
 	statusRefs := make([]string, len(found.Statuses))
 	for i, s := range found.Statuses {
 		statusRefs[i] = s.ID

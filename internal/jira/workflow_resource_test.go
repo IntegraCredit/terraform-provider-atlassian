@@ -73,32 +73,59 @@ func (s *workflowMockState) apiItem() map[string]interface{} {
 	}
 }
 
+// serveWorkflowStatuses answers GET /rest/api/3/statuses with one status per requested ID.
+func serveWorkflowStatuses(w http.ResponseWriter, r *http.Request) {
+	ids := r.URL.Query()["id"]
+	statuses := make([]map[string]interface{}, len(ids))
+	for i, id := range ids {
+		statuses[i] = map[string]interface{}{
+			"id":             id,
+			"name":           "Status " + id,
+			"statusCategory": "TODO",
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(statuses)
+}
+
+// serveWorkflowCreate answers POST /rest/api/3/workflows/create and stores the workflow.
+// The provider uses each status ID as its statusReference.
+func serveWorkflowCreate(w http.ResponseWriter, r *http.Request, state *workflowMockState) {
+	var body struct {
+		Workflows []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Statuses    []struct {
+				StatusReference string `json:"statusReference"`
+			} `json:"statuses"`
+		} `json:"workflows"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Workflows) != 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	wf := body.Workflows[0]
+	statusIDs := make([]string, len(wf.Statuses))
+	for i, s := range wf.Statuses {
+		statusIDs[i] = s.StatusReference
+	}
+	state.set(workflowFixedEntityID, wf.Name, wf.Description, statusIDs)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"workflows": []interface{}{
+			map[string]interface{}{"id": workflowFixedEntityID, "name": wf.Name},
+		},
+	})
+}
+
 func newWorkflowMockServer(state *workflowMockState) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflow":
-			var body struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				Statuses    []struct {
-					ID string `json:"id"`
-				} `json:"statuses"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			statusIDs := make([]string, len(body.Statuses))
-			for i, s := range body.Statuses {
-				statusIDs[i] = s.ID
-			}
-			state.set(workflowFixedEntityID, body.Name, body.Description, statusIDs)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"entityId": workflowFixedEntityID,
-				"name":     body.Name,
-			})
+		case r.Method == "GET" && r.URL.Path == "/rest/api/3/statuses":
+			serveWorkflowStatuses(w, r)
+
+		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflows/create":
+			serveWorkflowCreate(w, r, state)
 
 		case r.Method == "GET" && r.URL.Path == "/rest/api/3/workflow/search":
 			entityID, _, _, _ := state.get()
@@ -175,29 +202,11 @@ func TestAccWorkflowResource_Read_NotFound(t *testing.T) {
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflow":
-			var body struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-				Statuses    []struct {
-					ID string `json:"id"`
-				} `json:"statuses"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			statusIDs := make([]string, len(body.Statuses))
-			for i, s := range body.Statuses {
-				statusIDs[i] = s.ID
-			}
-			state.set(workflowFixedEntityID, body.Name, body.Description, statusIDs)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"entityId": workflowFixedEntityID,
-				"name":     body.Name,
-			})
+		case r.Method == "GET" && r.URL.Path == "/rest/api/3/statuses":
+			serveWorkflowStatuses(w, r)
+
+		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflows/create":
+			serveWorkflowCreate(w, r, state)
 
 		case r.Method == "GET" && r.URL.Path == "/rest/api/3/workflow/search":
 			mu.Lock()

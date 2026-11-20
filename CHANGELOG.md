@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.2...v0.1.3) (2026-11-20)
+
+
+### Bug Fixes
+
+* Create workflows with the bulk workflow API ([908aff6](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/908aff650011997e8d4ff59ae04866d8acc7356a))
+* Create workflows with the bulk workflow API ([97a1a13](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/97a1a132fa80a5f566df309318d8075b65c0dbe8))
+
 ## [0.1.2](https://github.com/lbajsarowicz/terraform-provider-atlassian/compare/v0.1.1...v0.1.2) (2026-04-04)
 
 
