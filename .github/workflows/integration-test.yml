@@ -44,6 +44,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # terraform-plugin-testing checks its own Terraform download against an
+      # expired HashiCorp key. With Terraform on PATH, it skips the download.
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
       # Credentials are secrets on the `integration` environment.
       - name: Run integration tests
         env:
