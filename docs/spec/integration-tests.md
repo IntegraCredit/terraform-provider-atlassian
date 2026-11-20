@@ -243,6 +243,7 @@ func TestIntegration_preflight(t *testing.T) {
 
 Key decisions:
 - **`environment: integration`**: GitHub Environment with required reviewers. Protects secrets from malicious code merged to main. Also gates `workflow_dispatch` triggers.
+- **Credentials are environment secrets**: `ATLASSIAN_URL`, `ATLASSIAN_USER` and `ATLASSIAN_TOKEN` are secrets on the `integration` environment, passed only to the steps that run tests or sweepers. A repository admin sets them with `gh secret set <NAME> --env integration`. `ATLASSIAN_URL` must point at the test site, or `SweepClient()` fails every test.
 - **`concurrency` with `cancel-in-progress: false`**: Prevents parallel runs against the same Jira instance (resource name collisions). Queues runs instead of cancelling.
 - **`-run '^TestIntegration'`**: Anchored regex — only runs `TestIntegration*` functions, not existing `TestAcc*` mock tests.
 - **Sweeper runs `always()`**: Cleans up even when tests fail.
