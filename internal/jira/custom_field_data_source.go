@@ -87,8 +87,10 @@ func (d *customFieldDataSource) Read(ctx context.Context, req datasource.ReadReq
 
 	// Use GET /rest/api/3/field/search which is not cached (unlike GET /rest/api/3/field).
 	// The query param is a fuzzy search, so we filter for exact name match client-side.
+	// Jira returns searcherKey as null unless it is expanded.
 	name := config.Name.ValueString()
-	searchPath := fmt.Sprintf("/rest/api/3/field/search?query=%s&type=custom", atlassian.QueryEscape(name))
+	searchPath := fmt.Sprintf("/rest/api/3/field/search?query=%s&type=custom&expand=%s",
+		atlassian.QueryEscape(name), atlassian.QueryEscape("searcherKey"))
 	var searchResp struct {
 		Values []customFieldAPIResponse `json:"values"`
 	}

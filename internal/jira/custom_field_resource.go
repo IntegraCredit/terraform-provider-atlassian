@@ -276,7 +276,10 @@ func (r *customFieldResource) ImportState(ctx context.Context, req resource.Impo
 // Returns (nil, 404, nil) if no matching custom field is found.
 func (r *customFieldResource) findFieldByID(ctx context.Context, fieldID string) (*customFieldAPIResponse, int, error) {
 	// Use GET /rest/api/3/field/search?id={id} which is not cached (unlike GET /rest/api/3/field).
-	searchPath := fmt.Sprintf("/rest/api/3/field/search?id=%s", atlassian.QueryEscape(fieldID))
+	// Jira returns searcherKey as null unless it is expanded. An empty searcher_key in state
+	// differs from the configured one, and searcher_key forces replacement.
+	searchPath := fmt.Sprintf("/rest/api/3/field/search?id=%s&expand=%s",
+		atlassian.QueryEscape(fieldID), atlassian.QueryEscape("searcherKey"))
 	var searchResp struct {
 		Values []customFieldAPIResponse `json:"values"`
 	}
