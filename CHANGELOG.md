@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.3...v0.1.4) (2026-11-20)
+
+
+### Bug Fixes
+
+* Read custom field searcher_key from Jira ([b99ae07](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/b99ae0749c26959e32bd1f229008d85dafb795fe))
+
 ## [0.1.3](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.2...v0.1.3) (2026-11-20)
 
 
