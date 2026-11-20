@@ -119,6 +119,50 @@ resource "atlassian_jira_custom_field" "test" {
 	})
 }
 
+const testIntegrationTextSearcher = "com.atlassian.jira.plugin.system.customfieldtypes:textsearcher"
+
+// searcher_key forces replacement, and Jira returns searcherKey only when the field search
+// expands it. If Read or ImportState lost the key, the plan after apply would replace the field.
+func TestIntegrationCustomFieldResource_searcherKey(t *testing.T) {
+	testutil.SkipIfNoAcc(t)
+	rName := acctest.RandomWithPrefix("tf-acc-test")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
+		CheckDestroy:             testCheckCustomFieldDestroyed,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "atlassian_jira_custom_field" "test" {
+  name         = %q
+  type         = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+  searcher_key = %q
+}
+`, rName, testIntegrationTextSearcher),
+				Check: resource.TestCheckResourceAttr("atlassian_jira_custom_field.test", "searcher_key", testIntegrationTextSearcher),
+			},
+			{
+				RefreshState: true,
+				Check:        resource.TestCheckResourceAttr("atlassian_jira_custom_field.test", "searcher_key", testIntegrationTextSearcher),
+			},
+			{
+				ResourceName:      "atlassian_jira_custom_field.test",
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					if len(states) != 1 {
+						return fmt.Errorf("expected 1 imported resource, got %d", len(states))
+					}
+					if got := states[0].Attributes["searcher_key"]; got != testIntegrationTextSearcher {
+						return fmt.Errorf("imported searcher_key = %q, want %q", got, testIntegrationTextSearcher)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
 func TestIntegrationCustomFieldDataSource_basic(t *testing.T) {
 	testutil.SkipIfNoAcc(t)
 	rName := acctest.RandomWithPrefix("tf-acc-test")
@@ -130,17 +174,19 @@ func TestIntegrationCustomFieldDataSource_basic(t *testing.T) {
 			{
 				Config: fmt.Sprintf(`
 resource "atlassian_jira_custom_field" "test" {
-  name = %q
-  type = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+  name         = %q
+  type         = "com.atlassian.jira.plugin.system.customfieldtypes:textfield"
+  searcher_key = %q
 }
 
 data "atlassian_jira_custom_field" "test" {
   name = atlassian_jira_custom_field.test.name
 }
-`, rName),
+`, rName, testIntegrationTextSearcher),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("data.atlassian_jira_custom_field.test", "name", rName),
 					resource.TestCheckResourceAttrSet("data.atlassian_jira_custom_field.test", "id"),
+					resource.TestCheckResourceAttr("data.atlassian_jira_custom_field.test", "searcher_key", testIntegrationTextSearcher),
 				),
 			},
 		},
