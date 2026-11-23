@@ -119,6 +119,65 @@ func TestIntegrationIssueTypeScreenSchemeResource_update(t *testing.T) {
 	})
 }
 
+// Changing the default mapping must update the scheme in place and leave no
+// diff behind, the same as changing any issue type's mapping.
+func TestIntegrationIssueTypeScreenSchemeResource_updateDefaultMapping(t *testing.T) {
+	testutil.SkipIfNoAcc(t)
+	rName := acctest.RandomWithPrefix("tf-acc-test")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
+		CheckDestroy:             testCheckIssueTypeScreenSchemeDestroyed,
+		Steps: []resource.TestStep{
+			{
+				Config: testIntegrationIssueTypeScreenSchemeDefaultConfig(rName, "first"),
+				Check: resource.TestCheckResourceAttrPair(
+					"atlassian_jira_issue_type_screen_scheme.test", "mappings.default",
+					"atlassian_jira_screen_scheme.first", "id",
+				),
+			},
+			{
+				Config: testIntegrationIssueTypeScreenSchemeDefaultConfig(rName, "second"),
+				Check: resource.TestCheckResourceAttrPair(
+					"atlassian_jira_issue_type_screen_scheme.test", "mappings.default",
+					"atlassian_jira_screen_scheme.second", "id",
+				),
+			},
+		},
+	})
+}
+
+// testIntegrationIssueTypeScreenSchemeDefaultConfig creates two screen schemes and
+// maps the issue type screen scheme's default to the one named by target.
+func testIntegrationIssueTypeScreenSchemeDefaultConfig(name, target string) string {
+	return fmt.Sprintf(`
+resource "atlassian_jira_screen" "itss_dep" {
+  name = "%[1]s-screen"
+}
+
+resource "atlassian_jira_screen_scheme" "first" {
+  name = "%[1]s-screenscheme-first"
+  screens = {
+    default = atlassian_jira_screen.itss_dep.id
+  }
+}
+
+resource "atlassian_jira_screen_scheme" "second" {
+  name = "%[1]s-screenscheme-second"
+  screens = {
+    default = atlassian_jira_screen.itss_dep.id
+  }
+}
+
+resource "atlassian_jira_issue_type_screen_scheme" "test" {
+  name = %[1]q
+  mappings = {
+    default = atlassian_jira_screen_scheme.%[2]s.id
+  }
+}
+`, name, target)
+}
+
 func TestIntegrationIssueTypeScreenSchemeDataSource_basic(t *testing.T) {
 	testutil.SkipIfNoAcc(t)
 	rName := acctest.RandomWithPrefix("tf-acc-test")
