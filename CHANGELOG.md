@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.4...v0.1.5) (2026-11-23)
+
+
+### Bug Fixes
+
+* Change a project's scheme in place instead of replacing it ([22be4c9](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/22be4c94b46ac9f6c0fd9638baaac075924d5e8e))
+* Change project schemes in place and fix default mapping updates ([2648d1a](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/2648d1abf867364f7d16b7a4cb617e486de710a1))
+* Update an issue type screen scheme's default mapping ([a4f3448](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/a4f34486c800cc07d45b55dfd66fb9ecc60ab199))
+
 ## [0.1.4](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.3...v0.1.4) (2026-11-20)
 
 
