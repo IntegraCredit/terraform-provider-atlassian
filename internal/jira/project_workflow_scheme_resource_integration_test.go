@@ -7,6 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/testutil"
 )
@@ -31,10 +32,28 @@ func TestIntegrationProjectWorkflowSchemeResource_basic(t *testing.T) {
 		CheckDestroy:             testCheckProjectWorkflowSchemeDestroyed,
 		Steps: []resource.TestStep{
 			{
-				Config: testIntegrationProjectWorkflowSchemeConfig(projectKey, rName, leadAccountID),
+				Config: testIntegrationProjectWorkflowSchemeConfig(projectKey, rName, leadAccountID, "test"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrSet("atlassian_jira_project_workflow_scheme.test", "project_id"),
-					resource.TestCheckResourceAttrSet("atlassian_jira_project_workflow_scheme.test", "workflow_scheme_id"),
+					resource.TestCheckResourceAttrPair(
+						"atlassian_jira_project_workflow_scheme.test", "workflow_scheme_id",
+						"atlassian_jira_workflow_scheme.test", "id",
+					),
+				),
+			},
+			{
+				// Switching schemes must be one in-place assignment, not a replace
+				// that passes through the default scheme. The project has no issues,
+				// so Jira accepts the change.
+				Config: testIntegrationProjectWorkflowSchemeConfig(projectKey, rName, leadAccountID, "other"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("atlassian_jira_project_workflow_scheme.test", plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.TestCheckResourceAttrPair(
+					"atlassian_jira_project_workflow_scheme.test", "workflow_scheme_id",
+					"atlassian_jira_workflow_scheme.other", "id",
 				),
 			},
 			{
@@ -56,7 +75,9 @@ func testProjectWorkflowSchemeImportID(s *terraform.State) (string, error) {
 	return rs.Primary.Attributes["project_id"], nil
 }
 
-func testIntegrationProjectWorkflowSchemeConfig(projectKey, name, leadAccountID string) string {
+// testIntegrationProjectWorkflowSchemeConfig creates a project and two workflow
+// schemes, and assigns the one named by scheme ("test" or "other") to the project.
+func testIntegrationProjectWorkflowSchemeConfig(projectKey, name, leadAccountID, scheme string) string {
 	return fmt.Sprintf(`
 resource "atlassian_jira_project" "test" {
   key              = %q
@@ -71,11 +92,17 @@ resource "atlassian_jira_workflow_scheme" "test" {
   default_workflow = "jira"
 }
 
+resource "atlassian_jira_workflow_scheme" "other" {
+  name             = %q
+  description      = "Integration test (run %s)"
+  default_workflow = "jira"
+}
+
 resource "atlassian_jira_project_workflow_scheme" "test" {
   project_id         = atlassian_jira_project.test.id
-  workflow_scheme_id = atlassian_jira_workflow_scheme.test.id
+  workflow_scheme_id = atlassian_jira_workflow_scheme.%s.id
 }
-`, projectKey, name, leadAccountID, name+"-wf-scheme", testutil.RunID())
+`, projectKey, name, leadAccountID, name+"-wf-scheme", testutil.RunID(), name+"-wf-scheme-other", testutil.RunID(), scheme)
 }
 
 func testCheckProjectWorkflowSchemeDestroyed(s *terraform.State) error {

@@ -151,10 +151,34 @@ func newIssueTypeScreenSchemeMockServer(state *issueTypeScreenSchemeMockState) *
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			// Jira rejects the whole request when it includes the default mapping.
+			for _, m := range body.IssueTypeMappings {
+				if m.IssueTypeID == "default" {
+					w.WriteHeader(http.StatusBadRequest)
+					json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:errcheck
+						"errorMessages": []string{"A default mapping cannot be added."},
+					})
+					return
+				}
+			}
 			state.mu.Lock()
 			for _, m := range body.IssueTypeMappings {
 				state.mappings[m.IssueTypeID] = m.ScreenSchemeID
 			}
+			state.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+
+		// Update the default mapping
+		case r.Method == "PUT" && r.URL.Path == "/rest/api/3/issuetypescreenscheme/"+fixedID+"/mapping/default":
+			var body struct {
+				ScreenSchemeID string `json:"screenSchemeId"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ScreenSchemeID == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			state.mu.Lock()
+			state.mappings["default"] = body.ScreenSchemeID
 			state.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 
@@ -285,20 +309,21 @@ func TestAccIssueTypeScreenSchemeResource_update(t *testing.T) {
 					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "mappings.10003", "10004"),
 				),
 			},
-			// Update: rename, change description, remove 10003 mapping, add 10005 mapping
+			// Update: rename, change description, change the default mapping,
+			// remove 10003 mapping, add 10005 mapping
 			{
 				Config: fmt.Sprintf(`resource "atlassian_jira_issue_type_screen_scheme" "test" {
   name        = %q
   description = "Updated description"
   mappings = {
-    "default" = "10001"
+    "default" = "10007"
     "10005"   = "10006"
   }
 }`, updatedName),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "name", updatedName),
 					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "description", "Updated description"),
-					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "mappings.default", "10001"),
+					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "mappings.default", "10007"),
 					resource.TestCheckResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "mappings.10005", "10006"),
 					resource.TestCheckNoResourceAttr("atlassian_jira_issue_type_screen_scheme.test", "mappings.10003"),
 				),

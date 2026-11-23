@@ -8,6 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/testutil"
 )
@@ -32,10 +33,27 @@ func TestIntegrationProjectIssueTypeSchemeResource_basic(t *testing.T) {
 		CheckDestroy:             testCheckProjectIssueTypeSchemeReverted,
 		Steps: []resource.TestStep{
 			{
-				Config: testIntegrationProjectIssueTypeSchemeConfig(projectKey, rName, leadAccountID),
+				Config: testIntegrationProjectIssueTypeSchemeConfig(projectKey, rName, leadAccountID, "test"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrSet("atlassian_jira_project_issue_type_scheme.test", "project_id"),
-					resource.TestCheckResourceAttrSet("atlassian_jira_project_issue_type_scheme.test", "issue_type_scheme_id"),
+					resource.TestCheckResourceAttrPair(
+						"atlassian_jira_project_issue_type_scheme.test", "issue_type_scheme_id",
+						"atlassian_jira_issue_type_scheme.test", "id",
+					),
+				),
+			},
+			{
+				// Switching schemes must be one in-place assignment, not a replace
+				// that passes through the default scheme.
+				Config: testIntegrationProjectIssueTypeSchemeConfig(projectKey, rName, leadAccountID, "other"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("atlassian_jira_project_issue_type_scheme.test", plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.TestCheckResourceAttrPair(
+					"atlassian_jira_project_issue_type_scheme.test", "issue_type_scheme_id",
+					"atlassian_jira_issue_type_scheme.other", "id",
 				),
 			},
 			{
@@ -57,7 +75,9 @@ func testProjectIssueTypeSchemeImportID(s *terraform.State) (string, error) {
 	return rs.Primary.Attributes["project_id"], nil
 }
 
-func testIntegrationProjectIssueTypeSchemeConfig(projectKey, name, leadAccountID string) string {
+// testIntegrationProjectIssueTypeSchemeConfig creates a project and two issue type
+// schemes, and assigns the one named by scheme ("test" or "other") to the project.
+func testIntegrationProjectIssueTypeSchemeConfig(projectKey, name, leadAccountID, scheme string) string {
 	return fmt.Sprintf(`
 resource "atlassian_jira_project" "test" {
   key              = %q
@@ -78,11 +98,18 @@ resource "atlassian_jira_issue_type_scheme" "test" {
   issue_type_ids = [atlassian_jira_issue_type.its_dep.id]
 }
 
+resource "atlassian_jira_issue_type_scheme" "other" {
+  name           = %q
+  description    = "Integration test (run %s)"
+  issue_type_ids = [atlassian_jira_issue_type.its_dep.id]
+}
+
 resource "atlassian_jira_project_issue_type_scheme" "test" {
   project_id           = atlassian_jira_project.test.id
-  issue_type_scheme_id = atlassian_jira_issue_type_scheme.test.id
+  issue_type_scheme_id = atlassian_jira_issue_type_scheme.%s.id
 }
-`, projectKey, name, leadAccountID, name+"-it", testutil.RunID(), name+"-its", testutil.RunID())
+`, projectKey, name, leadAccountID, name+"-it", testutil.RunID(), name+"-its", testutil.RunID(),
+		name+"-its-other", testutil.RunID(), scheme)
 }
 
 func testCheckProjectIssueTypeSchemeReverted(s *terraform.State) error {

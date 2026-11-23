@@ -56,11 +56,8 @@ func (r *projectIssueTypeScreenSchemeResource) Schema(_ context.Context, _ resou
 				},
 			},
 			"issue_type_screen_scheme_id": schema.StringAttribute{
-				Description: "The ID of the issue type screen scheme. Changing this forces recreation of the resource.",
+				Description: "The ID of the issue type screen scheme. Changing this assigns the new scheme in place.",
 				Required:    true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 		},
 	}
@@ -90,18 +87,23 @@ func (r *projectIssueTypeScreenSchemeResource) Create(ctx context.Context, req r
 		return
 	}
 
-	body := map[string]string{
-		"issueTypeScreenSchemeId": plan.IssueTypeScreenSchemeID.ValueString(),
-		"projectId":               plan.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/issuetypescreenscheme/project", body, nil)
-	if err != nil {
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.IssueTypeScreenSchemeID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Error assigning issue type screen scheme to project", err.Error())
 		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// assign sets the project's issue type screen scheme. Jira replaces the current
+// one, so the same call serves Create, Update and the revert in Delete.
+func (r *projectIssueTypeScreenSchemeResource) assign(ctx context.Context, projectID, schemeID string) error {
+	body := map[string]string{
+		"issueTypeScreenSchemeId": schemeID,
+		"projectId":               projectID,
+	}
+
+	return r.client.Put(ctx, "/rest/api/3/issuetypescreenscheme/project", body, nil)
 }
 
 func (r *projectIssueTypeScreenSchemeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -126,23 +128,36 @@ func (r *projectIssueTypeScreenSchemeResource) Read(ctx context.Context, req res
 			resp.Diagnostics.AddError("Error parsing project issue type screen scheme response", err.Error())
 			return
 		}
-		if entry.IssueTypeScreenScheme.ID == state.IssueTypeScreenSchemeID.ValueString() {
-			state.IssueTypeScreenSchemeID = types.StringValue(entry.IssueTypeScreenScheme.ID)
-			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-			return
+		// Record whichever scheme the project uses now, so a scheme changed
+		// outside Terraform shows up as an update rather than a new resource.
+		for _, pid := range entry.ProjectIDs {
+			if pid == projectID {
+				state.IssueTypeScreenSchemeID = types.StringValue(entry.IssueTypeScreenScheme.ID)
+				resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+				return
+			}
 		}
 	}
 
-	// Association not found — remove from state.
+	// Project not found — remove from state.
 	resp.State.RemoveResource(ctx)
 }
 
-func (r *projectIssueTypeScreenSchemeResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// Both fields have RequiresReplace, so Update is never called.
-	resp.Diagnostics.AddError(
-		"Update not supported",
-		"Changing project_id or issue_type_screen_scheme_id requires replacing the resource.",
-	)
+// Update assigns the new scheme directly. Only project_id forces a replace, so
+// changing the scheme never passes through the default scheme on the way.
+func (r *projectIssueTypeScreenSchemeResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan projectIssueTypeScreenSchemeResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.IssueTypeScreenSchemeID.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Error assigning issue type screen scheme to project", err.Error())
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *projectIssueTypeScreenSchemeResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -156,12 +171,7 @@ func (r *projectIssueTypeScreenSchemeResource) Delete(ctx context.Context, req r
 	// On destroy, revert the project to the default issue type screen scheme (ID 1).
 	const defaultIssueTypeScreenSchemeID = "1"
 
-	body := map[string]string{
-		"issueTypeScreenSchemeId": defaultIssueTypeScreenSchemeID,
-		"projectId":               state.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/issuetypescreenscheme/project", body, nil)
+	err := r.assign(ctx, state.ProjectID.ValueString(), defaultIssueTypeScreenSchemeID)
 	if err != nil {
 		// Tolerate failure (e.g. project deleted out-of-band); emit a warning so
 		// Terraform can still clean up state.

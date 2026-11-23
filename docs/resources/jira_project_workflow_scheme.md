@@ -24,4 +24,4 @@ resource "atlassian_jira_project_workflow_scheme" "example" {
 ### Required
 
 - `project_id` (String) The ID of the project. Changing this forces recreation of the resource.
-- `workflow_scheme_id` (String) The ID of the workflow scheme to assign. Changing this forces recreation of the resource.
+- `workflow_scheme_id` (String) The ID of the workflow scheme to assign. Changing this assigns the new scheme in place. Jira only accepts the change while the project has no issues.

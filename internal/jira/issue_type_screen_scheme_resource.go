@@ -246,9 +246,23 @@ func (r *issueTypeScreenSchemeResource) Update(ctx context.Context, req resource
 		return
 	}
 
+	// Jira refuses "default" in the append call ("A default mapping cannot be
+	// added"), so the default screen scheme has its own endpoint.
+	if planDefault, ok := planMappings["default"]; ok && planDefault != stateMappings["default"] {
+		defaultPath := fmt.Sprintf("/rest/api/3/issuetypescreenscheme/%s/mapping/default", atlassian.PathEscape(schemeID))
+		defaultBody := map[string]string{"screenSchemeId": planDefault}
+		if err := r.client.Put(ctx, defaultPath, defaultBody, nil); err != nil {
+			resp.Diagnostics.AddError("Error updating the default issue type screen scheme mapping", err.Error())
+			return
+		}
+	}
+
 	// Determine mappings to add/update (in plan but not in state, or different screenSchemeId)
 	var toAddOrUpdate []issueTypeScreenSchemeMappingItem
 	for issueTypeID, screenSchemeID := range planMappings {
+		if issueTypeID == "default" {
+			continue
+		}
 		if existing, ok := stateMappings[issueTypeID]; !ok || existing != screenSchemeID {
 			toAddOrUpdate = append(toAddOrUpdate, issueTypeScreenSchemeMappingItem{
 				IssueTypeID:    issueTypeID,

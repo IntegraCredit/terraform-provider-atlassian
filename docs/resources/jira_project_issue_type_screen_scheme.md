@@ -23,5 +23,5 @@ resource "atlassian_jira_project_issue_type_screen_scheme" "example" {
 
 ### Required
 
-- `issue_type_screen_scheme_id` (String) The ID of the issue type screen scheme. Changing this forces recreation of the resource.
+- `issue_type_screen_scheme_id` (String) The ID of the issue type screen scheme. Changing this assigns the new scheme in place.
 - `project_id` (String) The ID of the project. Changing this forces recreation of the resource.
