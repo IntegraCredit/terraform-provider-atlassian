@@ -350,6 +350,7 @@ func newProjectWorkflowSchemeMockServer(projectID, schemeID string) *httptest.Se
 						"description": "",
 						"draft":       false,
 					},
+					"projectIds": []string{projectID},
 				},
 			}))
 
@@ -430,6 +431,7 @@ func TestAccProjectWorkflowSchemeResource_notFound(t *testing.T) {
 						"description": "",
 						"draft":       false,
 					},
+					"projectIds": []string{projectID},
 				},
 			}))
 

@@ -37,6 +37,7 @@ type projectWorkflowSchemeResourceModel struct {
 // GET /rest/api/3/workflowscheme/project response values array.
 type projectWorkflowSchemeListEntry struct {
 	WorkflowScheme workflowSchemeAPIResponse `json:"workflowScheme"`
+	ProjectIDs     []string                  `json:"projectIds"`
 }
 
 func (r *projectWorkflowSchemeResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -55,11 +56,9 @@ func (r *projectWorkflowSchemeResource) Schema(_ context.Context, _ resource.Sch
 				},
 			},
 			"workflow_scheme_id": schema.StringAttribute{
-				Description: "The ID of the workflow scheme to assign. Changing this forces recreation of the resource.",
-				Required:    true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
+				Description: "The ID of the workflow scheme to assign. Changing this assigns the new scheme in place. " +
+					"Jira only accepts the change while the project has no issues.",
+				Required: true,
 			},
 		},
 	}
@@ -89,18 +88,23 @@ func (r *projectWorkflowSchemeResource) Create(ctx context.Context, req resource
 		return
 	}
 
-	body := map[string]string{
-		"workflowSchemeId": plan.WorkflowSchemeID.ValueString(),
-		"projectId":        plan.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/workflowscheme/project", body, nil)
-	if err != nil {
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.WorkflowSchemeID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Error assigning workflow scheme to project", err.Error())
 		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// assign sets the project's workflow scheme. Jira replaces the current one, so
+// the same call serves Create, Update and the revert in Delete.
+func (r *projectWorkflowSchemeResource) assign(ctx context.Context, projectID, schemeID string) error {
+	body := map[string]string{
+		"workflowSchemeId": schemeID,
+		"projectId":        projectID,
+	}
+
+	return r.client.Put(ctx, "/rest/api/3/workflowscheme/project", body, nil)
 }
 
 func (r *projectWorkflowSchemeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -126,24 +130,36 @@ func (r *projectWorkflowSchemeResource) Read(ctx context.Context, req resource.R
 			resp.Diagnostics.AddError("Error parsing project workflow scheme response", err.Error())
 			return
 		}
-		schemeIDStr := fmt.Sprintf("%d", entry.WorkflowScheme.ID)
-		if schemeIDStr == state.WorkflowSchemeID.ValueString() {
-			state.WorkflowSchemeID = types.StringValue(schemeIDStr)
-			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-			return
+		// Record whichever scheme the project uses now, so a scheme changed
+		// outside Terraform shows up as an update rather than a new resource.
+		for _, pid := range entry.ProjectIDs {
+			if pid == projectID {
+				state.WorkflowSchemeID = types.StringValue(fmt.Sprintf("%d", entry.WorkflowScheme.ID))
+				resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+				return
+			}
 		}
 	}
 
-	// Association not found — remove from state.
+	// Project not found — remove from state.
 	resp.State.RemoveResource(ctx)
 }
 
-func (r *projectWorkflowSchemeResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// Both fields have RequiresReplace, so Update is never called.
-	resp.Diagnostics.AddError(
-		"Update not supported",
-		"Changing project_id or workflow_scheme_id requires replacing the resource.",
-	)
+// Update assigns the new scheme directly. Only project_id forces a replace, so
+// changing the scheme never passes through the default scheme on the way.
+func (r *projectWorkflowSchemeResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan projectWorkflowSchemeResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.WorkflowSchemeID.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Error assigning workflow scheme to project", err.Error())
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *projectWorkflowSchemeResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -158,12 +174,7 @@ func (r *projectWorkflowSchemeResource) Delete(ctx context.Context, req resource
 	// the custom scheme becomes inactive and can be deleted by Terraform.
 	const defaultWorkflowSchemeID = "10000"
 
-	body := map[string]string{
-		"workflowSchemeId": defaultWorkflowSchemeID,
-		"projectId":        state.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/workflowscheme/project", body, nil)
+	err := r.assign(ctx, state.ProjectID.ValueString(), defaultWorkflowSchemeID)
 	if err != nil {
 		// Tolerate failure (e.g. project deleted out-of-band); emit a warning
 		// so Terraform can still clean up state.

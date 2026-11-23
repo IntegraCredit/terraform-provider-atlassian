@@ -55,11 +55,8 @@ func (r *projectIssueTypeSchemeResource) Schema(_ context.Context, _ resource.Sc
 				},
 			},
 			"issue_type_scheme_id": schema.StringAttribute{
-				Description: "The ID of the issue type scheme to assign. Changing this forces recreation of the resource.",
+				Description: "The ID of the issue type scheme to assign. Changing this assigns the new scheme in place.",
 				Required:    true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 		},
 	}
@@ -89,18 +86,23 @@ func (r *projectIssueTypeSchemeResource) Create(ctx context.Context, req resourc
 		return
 	}
 
-	body := map[string]string{
-		"issueTypeSchemeId": plan.IssueTypeSchemeID.ValueString(),
-		"projectId":         plan.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/issuetypescheme/project", body, nil)
-	if err != nil {
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.IssueTypeSchemeID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Error assigning issue type scheme to project", err.Error())
 		return
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// assign sets the project's issue type scheme. Jira replaces the current one,
+// so the same call serves Create, Update and the revert in Delete.
+func (r *projectIssueTypeSchemeResource) assign(ctx context.Context, projectID, schemeID string) error {
+	body := map[string]string{
+		"issueTypeSchemeId": schemeID,
+		"projectId":         projectID,
+	}
+
+	return r.client.Put(ctx, "/rest/api/3/issuetypescheme/project", body, nil)
 }
 
 func (r *projectIssueTypeSchemeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -138,12 +140,21 @@ func (r *projectIssueTypeSchemeResource) Read(ctx context.Context, req resource.
 	resp.State.RemoveResource(ctx)
 }
 
-func (r *projectIssueTypeSchemeResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	// Both fields have RequiresReplace, so Update is never called.
-	resp.Diagnostics.AddError(
-		"Update not supported",
-		"Changing project_id or issue_type_scheme_id requires replacing the resource.",
-	)
+// Update assigns the new scheme directly. Only project_id forces a replace, so
+// changing the scheme never passes through the default scheme on the way.
+func (r *projectIssueTypeSchemeResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan projectIssueTypeSchemeResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if err := r.assign(ctx, plan.ProjectID.ValueString(), plan.IssueTypeSchemeID.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Error assigning issue type scheme to project", err.Error())
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *projectIssueTypeSchemeResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -157,12 +168,7 @@ func (r *projectIssueTypeSchemeResource) Delete(ctx context.Context, req resourc
 	// On destroy, revert the project to the default issue type scheme (ID 10000).
 	const defaultIssueTypeSchemeID = "10000"
 
-	body := map[string]string{
-		"issueTypeSchemeId": defaultIssueTypeSchemeID,
-		"projectId":         state.ProjectID.ValueString(),
-	}
-
-	err := r.client.Put(ctx, "/rest/api/3/issuetypescheme/project", body, nil)
+	err := r.assign(ctx, state.ProjectID.ValueString(), defaultIssueTypeSchemeID)
 	if err != nil {
 		// Tolerate 404: project may have been deleted out-of-band.
 		// Treat as a non-fatal warning so Terraform can still clean up state.
