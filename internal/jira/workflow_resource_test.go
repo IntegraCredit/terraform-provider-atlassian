@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/testutil"
 )
@@ -22,15 +24,17 @@ type workflowMockState struct {
 	name        string
 	description string
 	statuses    []string
+	transitions []map[string]interface{}
 }
 
-func (s *workflowMockState) set(entityID, name, description string, statuses []string) {
+func (s *workflowMockState) set(entityID, name, description string, statuses []string, transitions []map[string]interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entityID = entityID
 	s.name = name
 	s.description = description
 	s.statuses = statuses
+	s.transitions = transitions
 }
 
 func (s *workflowMockState) clear() {
@@ -40,6 +44,46 @@ func (s *workflowMockState) clear() {
 	s.name = ""
 	s.description = ""
 	s.statuses = nil
+	s.transitions = nil
+}
+
+// bulkRead answers POST /rest/api/3/workflows: the stored workflow when the
+// request names it by ID or name, 404 otherwise.
+func (s *workflowMockState) bulkRead(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WorkflowIDs   []string `json:"workflowIds"`
+		WorkflowNames []string `json:"workflowNames"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entityID == "" || !(slices.Contains(body.WorkflowIDs, s.entityID) || slices.Contains(body.WorkflowNames, s.name)) {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	statuses := make([]map[string]interface{}, len(s.statuses))
+	refs := make([]map[string]interface{}, len(s.statuses))
+	for i, sid := range s.statuses {
+		statuses[i] = map[string]interface{}{"id": sid, "statusReference": sid, "name": "Status " + sid}
+		refs[i] = map[string]interface{}{"statusReference": sid, "properties": map[string]string{}}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"statuses": statuses,
+		"workflows": []interface{}{map[string]interface{}{
+			"id":          s.entityID,
+			"name":        s.name,
+			"description": s.description,
+			"version":     map[string]interface{}{"id": "11111111-2222-3333-4444-555555555555", "versionNumber": 1},
+			"statuses":    refs,
+			"transitions": s.transitions,
+		}},
+	})
 }
 
 func (s *workflowMockState) get() (string, string, string, []string) {
@@ -98,6 +142,7 @@ func serveWorkflowCreate(w http.ResponseWriter, r *http.Request, state *workflow
 			Statuses    []struct {
 				StatusReference string `json:"statusReference"`
 			} `json:"statuses"`
+			Transitions []map[string]interface{} `json:"transitions"`
 		} `json:"workflows"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Workflows) != 1 {
@@ -109,7 +154,7 @@ func serveWorkflowCreate(w http.ResponseWriter, r *http.Request, state *workflow
 	for i, s := range wf.Statuses {
 		statusIDs[i] = s.StatusReference
 	}
-	state.set(workflowFixedEntityID, wf.Name, wf.Description, statusIDs)
+	state.set(workflowFixedEntityID, wf.Name, wf.Description, statusIDs, wf.Transitions)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"workflows": []interface{}{
@@ -127,6 +172,10 @@ func newWorkflowMockServer(state *workflowMockState) *httptest.Server {
 		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflows/create":
 			serveWorkflowCreate(w, r, state)
 
+		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflows":
+			state.bulkRead(w, r)
+
+		// The data source still reads through the workflow search.
 		case r.Method == "GET" && r.URL.Path == "/rest/api/3/workflow/search":
 			entityID, _, _, _ := state.get()
 			if entityID == "" {
@@ -197,49 +246,17 @@ func TestAccWorkflowResource_Read_NotFound(t *testing.T) {
 	name := fmt.Sprintf("tf-test-%s", acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum))
 	state := &workflowMockState{}
 
-	var readCount int
-	var mu sync.Mutex
-
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == "GET" && r.URL.Path == "/rest/api/3/statuses":
-			serveWorkflowStatuses(w, r)
-
-		case r.Method == "POST" && r.URL.Path == "/rest/api/3/workflows/create":
-			serveWorkflowCreate(w, r, state)
-
-		case r.Method == "GET" && r.URL.Path == "/rest/api/3/workflow/search":
-			mu.Lock()
-			readCount++
-			current := readCount
-			mu.Unlock()
-
-			if current <= 1 {
-				// First read: return the workflow
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"values": []interface{}{state.apiItem()},
-				})
-			} else {
-				// Subsequent reads: return empty (workflow deleted out-of-band)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"values": []interface{}{},
-				})
-			}
-
-		case r.Method == "DELETE":
-			w.WriteHeader(http.StatusNoContent)
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
+	mockServer := newWorkflowMockServer(state)
 	defer mockServer.Close()
 
 	t.Setenv("ATLASSIAN_URL", mockServer.URL)
 	t.Setenv("ATLASSIAN_USER", "test@test.com")
 	t.Setenv("ATLASSIAN_TOKEN", "test-token")
+
+	config := fmt.Sprintf(`resource "atlassian_jira_workflow" "test" {
+  name     = %q
+  statuses = ["status-uuid-1"]
+}`, name)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
@@ -248,20 +265,21 @@ func TestAccWorkflowResource_Read_NotFound(t *testing.T) {
 		},
 		Steps: []resource.TestStep{
 			{
-				Config: fmt.Sprintf(`resource "atlassian_jira_workflow" "test" {
-  name     = %q
-  statuses = ["status-uuid-1"]
-}`, name),
+				Config: config,
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("atlassian_jira_workflow.test", "name", name),
 				),
 			},
 			{
-				Config: fmt.Sprintf(`resource "atlassian_jira_workflow" "test" {
-  name     = %q
-  statuses = ["status-uuid-1"]
-}`, name),
-				ExpectNonEmptyPlan: true,
+				// The workflow is deleted out-of-band: the bulk read answers 404,
+				// so Read removes it and the plan creates it again.
+				PreConfig: state.clear,
+				Config:    config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("atlassian_jira_workflow.test", plancheck.ResourceActionCreate),
+					},
+				},
 			},
 		},
 	})

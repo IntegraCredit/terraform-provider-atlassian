@@ -257,6 +257,39 @@ func (c *Client) Post(ctx context.Context, path string, body interface{}, v inte
 	return nil
 }
 
+// PostWithStatus performs a POST request with a JSON body and returns the status code.
+// On 404, returns (404, nil), like GetWithStatus. Jira's bulk reads are POSTs
+// and answer 404 when nothing matches.
+func (c *Client) PostWithStatus(ctx context.Context, path string, body interface{}, v interface{}) (int, error) {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling request body: %w", err)
+	}
+
+	resp, err := c.Do(ctx, "POST", path, jsonBody)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return http.StatusNotFound, nil
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, fmt.Errorf("POST %s: unexpected status %d: %s", path, resp.StatusCode, string(bodyBytes))
+	}
+
+	if v != nil {
+		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+			return resp.StatusCode, err
+		}
+	}
+
+	return resp.StatusCode, nil
+}
+
 // Put performs a PUT request with a JSON body and decodes the response into v.
 func (c *Client) Put(ctx context.Context, path string, body interface{}, v interface{}) error {
 	jsonBody, err := json.Marshal(body)
