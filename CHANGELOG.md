@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.7...v0.1.8) (2026-11-25)
+
+
+### Features
+
+* Manage the order of a screen tab's fields ([022fea4](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/022fea43de2f104b2ee0f2f48de903ce5fcb3760))
+
 ## [0.1.7](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.6...v0.1.7) (2026-11-25)
 
 
