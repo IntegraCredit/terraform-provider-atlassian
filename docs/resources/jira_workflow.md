@@ -2,12 +2,12 @@
 page_title: "atlassian_jira_workflow Resource"
 subcategory: ""
 description: |-
-    Manages a Jira Cloud workflow: its name, description, statuses and transitions. This version reads and imports a workflow with its transitions and shows any drift in a plan. It cannot change an existing workflow yet: a change is planned as an in-place update, never a replacement, and the apply fails before it calls Jira. A new workflow is created with its statuses and an initial transition into the first status; transitions must be left out of a new workflow's configuration.
+    Manages a Jira Cloud workflow: its name, description, statuses and transitions. A change to an existing workflow is an in-place update, never a replacement. The provider sends the whole workflow to Jira's bulk update API once Jira has validated it, and keeps what it does not manage as Jira holds it: the diagram layout, status properties, transition screens and the IDs of rules that stay. Jira applies the update to the live workflow, even when projects use it, with no draft workflow scheme. Two changes are refused before Jira changes anything: a new name, because Jira's API cannot rename a workflow, and removing a status from a workflow that projects use, because Jira then needs status mappings, which this version does not send. A new workflow is created with its statuses and an initial transition into the first status; transitions must be left out of a new workflow's configuration.
 ---
 
 # atlassian_jira_workflow (Resource)
 
-Manages a Jira Cloud workflow: its name, description, statuses and transitions. This version reads and imports a workflow with its transitions and shows any drift in a plan. It cannot change an existing workflow yet: a change is planned as an in-place update, never a replacement, and the apply fails before it calls Jira. A new workflow is created with its statuses and an initial transition into the first status; `transitions` must be left out of a new workflow's configuration.
+Manages a Jira Cloud workflow: its name, description, statuses and transitions. A change to an existing workflow is an in-place update, never a replacement. The provider sends the whole workflow to Jira's bulk update API once Jira has validated it, and keeps what it does not manage as Jira holds it: the diagram layout, status properties, transition screens and the IDs of rules that stay. Jira applies the update to the live workflow, even when projects use it, with no draft workflow scheme. Two changes are refused before Jira changes anything: a new `name`, because Jira's API cannot rename a workflow, and removing a status from a workflow that projects use, because Jira then needs status mappings, which this version does not send. A new workflow is created with its statuses and an initial transition into the first status; `transitions` must be left out of a new workflow's configuration.
 
 ## Example Usage
 
@@ -20,9 +20,9 @@ resource "atlassian_jira_workflow" "example" {
   ]
 }
 
-# An existing workflow, imported with its transitions. Changing an existing
-# workflow is not supported yet: a change plans an in-place update, and the
-# apply fails without changing anything.
+# An existing workflow, imported with its transitions. A change, such as a new
+# status with transitions into and out of it, is an in-place update. Keep the
+# IDs of existing transitions, and give a new transition a new numeric ID.
 import {
   to = atlassian_jira_workflow.development
   id = "Development Workflow" # the workflow's name or entity ID
@@ -90,13 +90,13 @@ resource "atlassian_jira_workflow" "development" {
 
 ### Required
 
-- `name` (String) The name of the workflow.
-- `statuses` (List of String) The IDs of the statuses the workflow uses. A new workflow's initial transition goes to the first. When the workflow is read, the order in state is kept if Jira holds the same statuses; an import takes Jira's order.
+- `name` (String) The name of the workflow. Jira's API cannot rename a workflow, so a plan that changes it fails; rename the workflow in Jira, then change this to match.
+- `statuses` (List of String) The IDs of the statuses the workflow uses. A new workflow's initial transition goes to the first. When the workflow is read, the order in state is kept if Jira holds the same statuses; an import takes Jira's order. A status can be added to a workflow in use; removing one from a workflow that projects use fails before Jira changes anything.
 
 ### Optional
 
 - `description` (String) The description of the workflow.
-- `transitions` (Attributes Map) The workflow's transitions, keyed by transition ID. Leave it out to ignore the transitions; they are still read into state. (see [below for nested schema](#nestedatt--transitions))
+- `transitions` (Attributes Map) The workflow's transitions, keyed by transition ID. Leave it out to ignore the transitions; they are still read into state, and an update keeps them as Jira holds them. When set, it is the whole list: a transition left out is removed. Keep the IDs of existing transitions; a new transition needs a new numeric ID, such as the highest ID plus 10. (see [below for nested schema](#nestedatt--transitions))
 
 ### Read-Only
 

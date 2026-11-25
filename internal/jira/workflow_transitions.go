@@ -2,9 +2,12 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -17,6 +20,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+// transitionIDPattern is the form Jira requires of a transition ID.
+var transitionIDPattern = regexp.MustCompile(`^[0-9]+$`)
 
 // maxConditionDepth is how many levels of condition groups the schema holds:
 // a transition's own group, the groups in it, and the groups in those.
@@ -42,43 +48,65 @@ type workflowReadStatus struct {
 	StatusReference string `json:"statusReference"`
 }
 
+// workflowReadItem is a workflow as the bulk read returns it. The bulk update
+// takes the same shapes back, so the fields the provider does not manage, such
+// as the diagram layout, are kept here as Jira sends them.
 type workflowReadItem struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Version     struct {
-		ID            string `json:"id"`
-		VersionNumber int64  `json:"versionNumber"`
-	} `json:"version"`
-	Statuses []struct {
-		StatusReference string `json:"statusReference"`
-	} `json:"statuses"`
-	Transitions []workflowTransitionAPI `json:"transitions"`
+	ID                              string                  `json:"id"`
+	Name                            string                  `json:"name"`
+	Description                     string                  `json:"description"`
+	Version                         workflowVersionAPI      `json:"version"`
+	StartPointLayout                json.RawMessage         `json:"startPointLayout"`
+	LoopedTransitionContainerLayout json.RawMessage         `json:"loopedTransitionContainerLayout"`
+	Statuses                        []workflowStatusAPI     `json:"statuses"`
+	Transitions                     []workflowTransitionAPI `json:"transitions"`
+}
+
+// workflowVersionAPI is a workflow's version. An update must name the current one.
+type workflowVersionAPI struct {
+	ID            string `json:"id"`
+	VersionNumber int64  `json:"versionNumber"`
+}
+
+// workflowStatusAPI is a status as one workflow uses it: its place in the
+// diagram, its properties and, in service projects, its approval.
+type workflowStatusAPI struct {
+	StatusReference       string          `json:"statusReference"`
+	Layout                json.RawMessage `json:"layout,omitempty"`
+	Properties            json.RawMessage `json:"properties"`
+	ApprovalConfiguration json.RawMessage `json:"approvalConfiguration,omitempty"`
 }
 
 type workflowTransitionAPI struct {
-	ID                string                      `json:"id"`
-	Name              string                      `json:"name"`
-	Description       string                      `json:"description"`
-	Type              string                      `json:"type"`
-	ToStatusReference string                      `json:"toStatusReference"`
-	Links             []workflowTransitionLinkAPI `json:"links"`
-	Conditions        *workflowConditionGroupAPI  `json:"conditions"`
-	Validators        []workflowRuleAPI           `json:"validators"`
-	Actions           []workflowRuleAPI           `json:"actions"`
-	Triggers          []workflowRuleAPI           `json:"triggers"`
-	Properties        map[string]string           `json:"properties"`
+	ID                 string                      `json:"id"`
+	Name               string                      `json:"name"`
+	Description        string                      `json:"description"`
+	Type               string                      `json:"type"`
+	ToStatusReference  string                      `json:"toStatusReference,omitempty"`
+	Links              []workflowTransitionLinkAPI `json:"links"`
+	Conditions         *workflowConditionGroupAPI  `json:"conditions,omitempty"`
+	Validators         []workflowRuleAPI           `json:"validators"`
+	Actions            []workflowRuleAPI           `json:"actions"`
+	Triggers           []workflowRuleAPI           `json:"triggers"`
+	Properties         map[string]string           `json:"properties"`
+	TransitionScreen   json.RawMessage             `json:"transitionScreen,omitempty"`
+	CustomIssueEventID json.RawMessage             `json:"customIssueEventId,omitempty"`
 }
 
-// workflowTransitionLinkAPI is one status a transition starts from. The
-// INITIAL transition's link has no fromStatusReference.
+// workflowTransitionLinkAPI is one status a transition starts from, with the
+// ports its arrow uses in the diagram. An INITIAL or GLOBAL transition's link
+// has no fromStatusReference and only places the arrow.
 type workflowTransitionLinkAPI struct {
-	FromStatusReference string `json:"fromStatusReference"`
+	FromStatusReference string `json:"fromStatusReference,omitempty"`
+	FromPort            *int   `json:"fromPort,omitempty"`
+	ToPort              *int   `json:"toPort,omitempty"`
 }
 
-// workflowRuleAPI is a condition, validator, post function or trigger. Its
-// "id" is left out: Jira generates it, so it is not part of the configuration.
+// workflowRuleAPI is a condition, validator, post function or trigger. Jira
+// generates its "id", so the ID is not part of the configuration; an update
+// sends it back for a rule that stays, or Jira would give the rule a new one.
 type workflowRuleAPI struct {
+	ID         string            `json:"id,omitempty"`
 	RuleKey    string            `json:"ruleKey"`
 	Parameters map[string]string `json:"parameters"`
 }
@@ -207,11 +235,17 @@ func workflowConditionGroupAttributes(level int) map[string]schema.Attribute {
 func workflowTransitionsAttribute() schema.MapNestedAttribute {
 	return schema.MapNestedAttribute{
 		Description: "The workflow's transitions, keyed by transition ID. Leave it out to ignore the " +
-			"transitions; they are still read into state.",
+			"transitions; they are still read into state, and an update keeps them as Jira holds them. " +
+			"When set, it is the whole list: a transition left out is removed. Keep the IDs of existing " +
+			"transitions; a new transition needs a new numeric ID, such as the highest ID plus 10.",
 		Optional: true,
 		Computed: true,
 		PlanModifiers: []planmodifier.Map{
 			mapplanmodifier.UseStateForUnknown(),
+		},
+		Validators: []validator.Map{
+			mapvalidator.KeysAre(stringvalidator.RegexMatches(transitionIDPattern,
+				"must be a transition ID: digits only, as Jira requires")),
 		},
 		NestedObject: schema.NestedAttributeObject{
 			Attributes: map[string]schema.Attribute{

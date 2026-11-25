@@ -121,11 +121,16 @@ func (r *workflowResource) Metadata(_ context.Context, req resource.MetadataRequ
 func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Manages a Jira Cloud workflow: its name, description, statuses and transitions. " +
-			"This version reads and imports a workflow with its transitions and shows any drift in a plan. " +
-			"It cannot change an existing workflow yet: a change is planned as an in-place update, never a " +
-			"replacement, and the apply fails before it calls Jira. A new workflow is created with its " +
-			"statuses and an initial transition into the first status; `transitions` must be left out of a " +
-			"new workflow's configuration.",
+			"A change to an existing workflow is an in-place update, never a replacement. The provider " +
+			"sends the whole workflow to Jira's bulk update API once Jira has validated it, and keeps what " +
+			"it does not manage as Jira holds it: the diagram layout, status properties, transition screens " +
+			"and the IDs of rules that stay. Jira applies the update to the live workflow, even when " +
+			"projects use it, with no draft workflow scheme. Two changes are refused before Jira changes " +
+			"anything: a new " +
+			"`name`, because Jira's API cannot rename a workflow, and removing a status from a workflow " +
+			"that projects use, because Jira then needs status mappings, which this version does not send. " +
+			"A new workflow is created with its statuses and an initial transition into the first status; " +
+			"`transitions` must be left out of a new workflow's configuration.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "The entity ID (UUID) of the workflow.",
@@ -135,8 +140,9 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				},
 			},
 			"name": schema.StringAttribute{
-				Description: "The name of the workflow.",
-				Required:    true,
+				Description: "The name of the workflow. Jira's API cannot rename a workflow, so a plan " +
+					"that changes it fails; rename the workflow in Jira, then change this to match.",
+				Required: true,
 			},
 			"description": schema.StringAttribute{
 				Description: "The description of the workflow.",
@@ -147,7 +153,8 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"statuses": schema.ListAttribute{
 				Description: "The IDs of the statuses the workflow uses. A new workflow's initial transition " +
 					"goes to the first. When the workflow is read, the order in state is kept if Jira holds " +
-					"the same statuses; an import takes Jira's order.",
+					"the same statuses; an import takes Jira's order. A status can be added to a workflow in " +
+					"use; removing one from a workflow that projects use fails before Jira changes anything.",
 				Required:    true,
 				ElementType: types.StringType,
 			},
@@ -431,7 +438,8 @@ func applyWorkflowRead(ctx context.Context, model *workflowResourceModel, found 
 	return diags
 }
 
-// ModifyPlan keeps the prior version when nothing else changes.
+// ModifyPlan refuses a new name, which Jira's API cannot set, and keeps the
+// prior version when nothing else changes.
 //
 // When the configuration leaves out transitions, Terraform proposes null for
 // them, because their nested attributes are not all computed. The
@@ -451,21 +459,177 @@ func (r *workflowResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
 		return
 	}
 
+	if !plan.Name.IsUnknown() && !plan.Name.Equal(state.Name) {
+		resp.Diagnostics.Append(workflowRenameError(state.Name.ValueString(), plan.Name.ValueString()))
+		return
+	}
+
 	if plan.ID.Equal(state.ID) && plan.Name.Equal(state.Name) && plan.Description.Equal(state.Description) &&
 		plan.Statuses.Equal(state.Statuses) && plan.Transitions.Equal(state.Transitions) {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("version"), state.Version)...)
 	}
 }
 
-// Update refuses every change. It makes no API call, so a failed apply leaves
-// the workflow as it was. Replacing the workflow instead would delete a live
-// workflow, so no attribute forces a replacement.
-func (r *workflowResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError(
-		"Updating a workflow is not supported yet",
-		"This version of the provider reads a workflow, transitions included, but cannot change it. "+
-			"Nothing was changed in Jira. Revert the change in the configuration, or make it in Jira.",
-	)
+// workflowRenameError explains that a workflow cannot be renamed. Jira's bulk
+// update takes no name and ignores one, and no other API renames a workflow.
+func workflowRenameError(from, to string) diag.Diagnostic {
+	return diag.NewAttributeErrorDiagnostic(path.Root("name"),
+		"Renaming a workflow is not supported",
+		fmt.Sprintf("The configuration renames workflow %q to %q, but Jira's API cannot rename a workflow. "+
+			"Nothing was changed in Jira. Rename the workflow in Jira's workflow editor, then change the "+
+			"name here to match.", from, to))
+}
+
+// Update gives the workflow the planned description, statuses and
+// transitions through POST /rest/api/3/workflows/update. It reads the live
+// workflow first, for its version and for what the provider does not manage,
+// and has Jira validate the request before sending it, so a refused change
+// leaves the workflow as it was.
+func (r *workflowResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan, state workflowResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if !plan.Name.Equal(state.Name) {
+		resp.Diagnostics.Append(workflowRenameError(state.Name.ValueString(), plan.Name.ValueString()))
+		return
+	}
+
+	var statusIDs []string
+	resp.Diagnostics.Append(plan.Statuses.ElementsAs(ctx, &statusIDs, false)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if len(statusIDs) == 0 {
+		resp.Diagnostics.AddError("Invalid workflow configuration", "At least one status is required")
+		return
+	}
+
+	live, liveIDs, err := r.fetchWorkflow(ctx, workflowReadRequest{WorkflowIDs: []string{state.ID.ValueString()}})
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading workflow before the update", err.Error())
+		return
+	}
+	if live == nil {
+		resp.Diagnostics.AddError("Error updating workflow",
+			fmt.Sprintf("workflow %s no longer exists in Jira", state.ID.ValueString()))
+		return
+	}
+
+	// Transitions left out of the configuration keep what Jira holds.
+	var transitions map[string]workflowTransitionValue
+	if plan.Transitions.IsNull() || plan.Transitions.IsUnknown() {
+		transitions, err = workflowTransitionsFromAPI(*live, liveIDs)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading workflow transitions", err.Error())
+			return
+		}
+	} else {
+		resp.Diagnostics.Append(plan.Transitions.ElementsAs(ctx, &transitions, false)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+
+	statuses, err := r.getStatuses(ctx, statusIDs)
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading workflow statuses", err.Error())
+		return
+	}
+
+	body := newWorkflowUpdateRequest(live, liveIDs, plan.Description.ValueString(), statuses, transitions)
+
+	resp.Diagnostics.Append(r.validateUpdate(ctx, body, live, liveIDs, statusIDs)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	var result workflowUpdateResponse
+	if err := r.client.Post(ctx, "/rest/api/3/workflows/update", body, &result); err != nil {
+		resp.Diagnostics.AddError("Error updating workflow", err.Error())
+		return
+	}
+	if result.TaskID != nil && *result.TaskID != "" {
+		if err := r.client.WaitForTask(ctx, *result.TaskID); err != nil {
+			resp.Diagnostics.AddError("Error updating workflow",
+				fmt.Sprintf("Jira accepted the update and continued it in task %s, which did not complete: %s",
+					*result.TaskID, err))
+			return
+		}
+	}
+
+	found, foundIDs, err := r.fetchWorkflow(ctx, workflowReadRequest{WorkflowIDs: []string{live.ID}})
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading updated workflow", err.Error())
+		return
+	}
+	if found == nil {
+		resp.Diagnostics.AddError("Error reading updated workflow",
+			fmt.Sprintf("workflow %s was updated but cannot be read back", live.ID))
+		return
+	}
+
+	resp.Diagnostics.Append(applyWorkflowRead(ctx, &plan, found, foundIDs)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// validateUpdate has Jira check the update without making it. Jira's errors
+// stop the update; its warnings are passed on. A missing status mapping means
+// the update removes a status from a workflow that projects use, which this
+// provider does not support yet, so it gets an error of its own.
+func (r *workflowResource) validateUpdate(ctx context.Context, body workflowUpdateRequest, live *workflowReadItem,
+	liveIDs map[string]string, planned []string) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	request := workflowUpdateValidationRequest{
+		Payload:           body,
+		ValidationOptions: workflowValidationOptions{Levels: []string{"ERROR", "WARNING"}},
+	}
+	var result workflowValidationResponse
+	if err := r.client.Post(ctx, "/rest/api/3/workflows/update/validation", request, &result); err != nil {
+		diags.AddError("Error validating workflow update", "Nothing was changed in Jira. "+err.Error())
+		return diags
+	}
+
+	var problems []string
+	needsMappings := false
+	for _, e := range result.Errors {
+		if e.Level == "WARNING" {
+			diags.AddWarning(fmt.Sprintf("Jira warns about workflow %q", live.Name), e.String())
+			continue
+		}
+		if e.Type == "STATUS_MAPPING" {
+			needsMappings = true
+		}
+		problems = append(problems, "- "+e.String())
+	}
+	if len(problems) == 0 {
+		return diags
+	}
+
+	jiraSaid := "Jira found these problems:\n" + strings.Join(problems, "\n")
+	if needsMappings {
+		diags.AddAttributeError(path.Root("statuses"),
+			"Removing a status from a workflow in use is not supported yet",
+			fmt.Sprintf("The update removes the statuses %s from workflow %q. Projects use the workflow, "+
+				"so Jira needs status mappings that move each project's issues out of those statuses, even "+
+				"when none are in them. This version of the provider does not send status mappings, so "+
+				"nothing was changed in Jira. Keep the statuses in the configuration, or remove them in "+
+				"Jira's workflow editor first and then here.\n\n%s",
+				strings.Join(removedStatusIDs(live, liveIDs, planned), ", "), live.Name, jiraSaid))
+		return diags
+	}
+
+	diags.AddError(fmt.Sprintf("Jira rejected the update of workflow %q", live.Name),
+		"Nothing was changed in Jira. "+jiraSaid)
+	return diags
 }
 
 func (r *workflowResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
