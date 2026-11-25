@@ -21,7 +21,7 @@ import (
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/atlassian"
 )
 
-// These tests call the workflow resource's Read, ImportState and Update
+// These tests call the workflow resource's Read and ImportState
 // directly against a mock of the bulk read, POST /rest/api/3/workflows.
 // They need no Terraform CLI and no TF_ACC, so they run in `make test` and CI.
 
@@ -372,23 +372,6 @@ func TestWorkflowResourceImportState_NotFound(t *testing.T) {
 	}
 	if detail := resp.Diagnostics.Errors()[0].Detail(); !strings.Contains(detail, `"No Such Workflow"`) {
 		t.Errorf("error detail = %q", detail)
-	}
-}
-
-// TestWorkflowResourceUpdate_RefusesWithoutCallingJira fails every update
-// before any request, so a failed apply leaves the workflow unchanged.
-func TestWorkflowResourceUpdate_RefusesWithoutCallingJira(t *testing.T) {
-	mock := &workflowReadMock{t: t}
-	r := &workflowResource{client: mock.client()}
-
-	var resp resource.UpdateResponse
-	r.Update(context.Background(), resource.UpdateRequest{}, &resp)
-	if !resp.Diagnostics.HasError() ||
-		!strings.Contains(resp.Diagnostics.Errors()[0].Summary(), "not supported yet") {
-		t.Errorf("diagnostics = %v, want a not supported error", resp.Diagnostics)
-	}
-	if len(mock.requests) != 0 {
-		t.Errorf("requests = %d, want 0", len(mock.requests))
 	}
 }
 

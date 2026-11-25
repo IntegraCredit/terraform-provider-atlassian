@@ -3,17 +3,20 @@ package jira_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/jira"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/testutil"
 )
 
@@ -23,12 +26,27 @@ const (
 )
 
 // newWorkflowFixtureServer serves testdata/workflow_bulk_read.json as an
-// existing workflow: the bulk read finds it by ID or name, and DELETE removes it.
+// existing workflow: the bulk read finds it by ID or name, the bulk update
+// changes it as Jira would, and DELETE removes it. The status lookup knows the
+// fixture's statuses and one more, 10200.
 func newWorkflowFixtureServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	fixture, err := os.ReadFile("testdata/workflow_bulk_read.json")
 	if err != nil {
 		t.Fatalf("reading fixture: %s", err)
+	}
+
+	var doc struct {
+		Statuses []map[string]interface{} `json:"statuses"`
+	}
+	if err := json.Unmarshal(fixture, &doc); err != nil {
+		t.Fatalf("decoding fixture: %s", err)
+	}
+	statuses := map[string]map[string]interface{}{
+		"10200": {"id": "10200", "name": "Merged", "description": "", "statusCategory": "IN_PROGRESS"},
+	}
+	for _, s := range doc.Statuses {
+		statuses[s["id"].(string)] = s
 	}
 
 	var mu sync.Mutex
@@ -56,6 +74,36 @@ func newWorkflowFixtureServer(t *testing.T) *httptest.Server {
 			w.Header().Set("Content-Type", "application/json")
 			w.Write(fixture) //nolint:errcheck
 
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/3/statuses":
+			found := []map[string]interface{}{}
+			for _, id := range r.URL.Query()["id"] {
+				if st, ok := statuses[id]; ok {
+					found = append(found, st)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(found) //nolint:errcheck
+
+		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/workflows/update/validation":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"errors":[]}`)) //nolint:errcheck
+
+		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/workflows/update":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			updated, err := jira.ApplyWorkflowUpdate(fixture, body)
+			if err != nil {
+				t.Errorf("applying update: %s", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			fixture = updated
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"taskId":null}`)) //nolint:errcheck
+
 		case r.Method == http.MethodDelete && r.URL.Path == "/rest/api/3/workflow/"+transitionsFixtureID:
 			deleted = true
 			w.WriteHeader(http.StatusNoContent)
@@ -70,11 +118,37 @@ func newWorkflowFixtureServer(t *testing.T) *httptest.Server {
 // transitionsFixtureConfig is the configuration that matches the fixture.
 // doneName renames transition 31; name renames the workflow.
 func transitionsFixtureConfig(name, doneName string) string {
+	return transitionsFixtureConfigWith(name, doneName, `"10000", "3", "10002", "10100"`, "")
+}
+
+// transitionsFixtureMergedConfig adds status 10200 and transitions 41 into it
+// and 51 out of it to the fixture's configuration.
+func transitionsFixtureMergedConfig(doneName string) string {
+	return transitionsFixtureConfigWith(transitionsFixtureName, doneName, `"10000", "3", "10002", "10100", "10200"`, `
+    "41" = {
+      name = "Merge"
+      type = "DIRECTED"
+      from = ["10100"]
+      to   = "10200"
+    }
+
+    "51" = {
+      name = "Ship"
+      type = "DIRECTED"
+      from = ["10200"]
+      to   = "10002"
+    }
+`)
+}
+
+// transitionsFixtureConfigWith is the fixture's configuration with the given
+// statuses and more transitions.
+func transitionsFixtureConfigWith(name, doneName, statuses, moreTransitions string) string {
 	return fmt.Sprintf(`
 resource "atlassian_jira_workflow" "test" {
   name        = %q
   description = "Workflow with transitions"
-  statuses    = ["10000", "3", "10002", "10100"]
+  statuses    = [%s]
 
   transitions = {
     "1" = {
@@ -149,16 +223,17 @@ resource "atlassian_jira_workflow" "test" {
         parameters = { field = "resolution", value = "", mode = "" }
       }]
     }
-  }
+%s  }
 }
-`, name, doneName)
+`, name, statuses, doneName, moreTransitions)
 }
 
 // TestAccWorkflowResource_ImportTransitions imports an existing workflow with
 // transitions, rules and three levels of conditions, by ID and by name, and
 // checks that the matching configuration plans no changes. A changed
-// transition or name plans an in-place update, never a replacement, and the
-// apply fails without changing anything.
+// transition and a new status each plan an in-place update, never a
+// replacement, that applies and then plans no changes. A new name and a
+// transition ID Jira would reject fail the plan.
 func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 	mockServer := newWorkflowFixtureServer(t)
 	defer mockServer.Close()
@@ -172,7 +247,11 @@ func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 	expectUpdate := resource.ConfigPlanChecks{
 		PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(address, plancheck.ResourceActionUpdate)},
 	}
-	notSupported := regexp.MustCompile(`Updating a workflow is not supported yet`)
+	renamed := transitionsFixtureConfig(transitionsFixtureName+"-renamed", "Done")
+	badTransitionID := strings.Replace(config, `"11" = {`, `"open" = {`, 1)
+	emptyConditions := strings.Replace(config, `name = "Done"`, "name = \"Done\"\n      conditions = { operation = \"ALL\" }", 1)
+	explicitEmptyConditions := strings.Replace(config, `name = "Done"`,
+		"name = \"Done\"\n      conditions = { operation = \"ALL\", rules = [], groups = [] }", 1)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
@@ -228,17 +307,53 @@ func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 				ImportStateKind: resource.ImportBlockWithID,
 				ImportStateId:   transitionsFixtureName,
 			},
-			// A changed transition and a new name each plan an in-place update,
-			// and the apply fails before calling Jira.
+			// A new name and a transition ID Jira rejects fail the plan.
+			{
+				Config:      renamed,
+				ExpectError: regexp.MustCompile(`Renaming a workflow is not supported`),
+			},
+			{
+				Config:      badTransitionID,
+				ExpectError: regexp.MustCompile(`must be a transition ID`),
+			},
+			{
+				Config:      emptyConditions,
+				ExpectError: regexp.MustCompile(`Empty condition group`),
+			},
+			{
+				Config:      explicitEmptyConditions,
+				ExpectError: regexp.MustCompile(`Empty condition group`),
+			},
+			// A changed transition is an in-place update. Applied, it plans no changes.
 			{
 				Config:           transitionsFixtureConfig(transitionsFixtureName, "Finish"),
 				ConfigPlanChecks: expectUpdate,
-				ExpectError:      notSupported,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(address, "id", transitionsFixtureID),
+					resource.TestCheckResourceAttr(address, "transitions.31.name", "Finish"),
+					resource.TestCheckResourceAttr(address, "version.number", "5"),
+				),
 			},
 			{
-				Config:           transitionsFixtureConfig(transitionsFixtureName+"-renamed", "Done"),
+				Config:   transitionsFixtureConfig(transitionsFixtureName, "Finish"),
+				PlanOnly: true,
+			},
+			// So is a new status with transitions into and out of it.
+			{
+				Config:           transitionsFixtureMergedConfig("Finish"),
 				ConfigPlanChecks: expectUpdate,
-				ExpectError:      notSupported,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(address, "statuses.#", "5"),
+					resource.TestCheckResourceAttr(address, "statuses.4", "10200"),
+					resource.TestCheckResourceAttr(address, "transitions.%", "6"),
+					resource.TestCheckResourceAttr(address, "transitions.41.to", "10200"),
+					resource.TestCheckResourceAttr(address, "transitions.51.from.0", "10200"),
+					resource.TestCheckResourceAttr(address, "version.number", "6"),
+				),
+			},
+			{
+				Config:   transitionsFixtureMergedConfig("Finish"),
+				PlanOnly: true,
 			},
 			// Leaving the transitions out of the configuration ignores them.
 			{
@@ -246,7 +361,7 @@ func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 resource "atlassian_jira_workflow" "test" {
   name        = "` + transitionsFixtureName + `"
   description = "Workflow with transitions"
-  statuses    = ["10000", "3", "10002", "10100"]
+  statuses    = ["10000", "3", "10002", "10100", "10200"]
 }
 `,
 				PlanOnly: true,

@@ -37,7 +37,9 @@ func restrictParams(permission string) map[string]string {
 
 // createTransitionsTestWorkflow creates, through the bulk create API, a
 // workflow with an initial, two directed and one global transition, with
-// validators, post functions, properties and three levels of conditions.
+// validators, post functions, properties and three levels of conditions. It
+// lays the statuses out in a row and gives transition 21's arrow from todo
+// its ports, which the provider does not manage but must keep.
 func createTransitionsTestWorkflow(name, description string, todo, doing, done transitionsTestStatus) (string, error) {
 	client, err := testutil.SweepClient()
 	if err != nil {
@@ -55,16 +57,20 @@ func createTransitionsTestWorkflow(name, description string, todo, doing, done t
 		statusDefs[i] = map[string]interface{}{
 			"id": s.id, "name": s.name, "description": "", "statusCategory": s.category, "statusReference": s.id,
 		}
-		statusRefs[i] = map[string]interface{}{"statusReference": s.id, "properties": map[string]string{}}
+		statusRefs[i] = map[string]interface{}{
+			"statusReference": s.id, "properties": map[string]string{},
+			"layout": map[string]float64{"x": float64(250 * i), "y": 0},
+		}
 	}
 
 	body := map[string]interface{}{
 		"scope":    map[string]string{"type": "GLOBAL"},
 		"statuses": statusDefs,
 		"workflows": []interface{}{map[string]interface{}{
-			"name":        name,
-			"description": description,
-			"statuses":    statusRefs,
+			"name":             name,
+			"description":      description,
+			"startPointLayout": map[string]float64{"x": 0, "y": -100},
+			"statuses":         statusRefs,
 			"transitions": []interface{}{
 				map[string]interface{}{
 					"id": "1", "name": "Create", "type": "INITIAL", "toStatusReference": todo.id,
@@ -94,7 +100,7 @@ func createTransitionsTestWorkflow(name, description string, todo, doing, done t
 				map[string]interface{}{
 					"id": "21", "name": "Done", "type": "DIRECTED", "toStatusReference": done.id,
 					"links": []interface{}{
-						map[string]string{"fromStatusReference": todo.id},
+						map[string]interface{}{"fromStatusReference": todo.id, "fromPort": 2, "toPort": 6},
 						map[string]string{"fromStatusReference": doing.id},
 					},
 					"validators": []interface{}{rule("system:check-permission-validator", map[string]string{"permissionKey": "RESOLVE_ISSUES"})},
@@ -155,7 +161,13 @@ resource "atlassian_jira_status" "done" {
 // transitionsTestWorkflowConfig is the configuration that matches the workflow
 // createTransitionsTestWorkflow creates.
 func transitionsTestWorkflowConfig(name, description string) string {
-	return transitionsTestStatusesConfig(name) + fmt.Sprintf(`
+	return transitionsTestStatusesConfig(name) + transitionsTestWorkflowBlock(name, description, "", "")
+}
+
+// transitionsTestWorkflowBlock is the workflow createTransitionsTestWorkflow
+// creates, with more statuses and transitions added to its lists.
+func transitionsTestWorkflowBlock(name, description, moreStatuses, moreTransitions string) string {
+	return fmt.Sprintf(`
 locals {
   restrict_empty = {
     accountIds            = ""
@@ -168,13 +180,13 @@ locals {
 }
 
 resource "atlassian_jira_workflow" "test" {
-  name        = %q
-  description = %q
+  name        = %[1]q
+  description = %[2]q
   statuses = [
     atlassian_jira_status.todo.id,
     atlassian_jira_status.doing.id,
     atlassian_jira_status.done.id,
-  ]
+%[3]s  ]
 
   transitions = {
     "1" = {
@@ -241,9 +253,9 @@ resource "atlassian_jira_workflow" "test" {
         parameters = { field = "resolution", value = "", mode = "" }
       }]
     }
-  }
+%[4]s  }
 }
-`, name, description)
+`, name, description, moreStatuses, moreTransitions)
 }
 
 // TestIntegrationWorkflowResource_importTransitions creates a workflow with

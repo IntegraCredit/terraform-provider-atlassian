@@ -6,9 +6,9 @@ resource "atlassian_jira_workflow" "example" {
   ]
 }
 
-# An existing workflow, imported with its transitions. Changing an existing
-# workflow is not supported yet: a change plans an in-place update, and the
-# apply fails without changing anything.
+# An existing workflow, imported with its transitions. A change, such as a new
+# status with transitions into and out of it, is an in-place update. Keep the
+# IDs of existing transitions, and give a new transition a new numeric ID.
 import {
   to = atlassian_jira_workflow.development
   id = "Development Workflow" # the workflow's name or entity ID
