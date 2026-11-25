@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.7](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.6...v0.1.7) (2026-11-25)
+
+
+### Features
+
+* Update a workflow in place ([f59f03b](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/f59f03bbfc442e954344db842f946d934ad77842))
+* Update a workflow in place ([e975f1a](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/e975f1a093679d2aa388e48339fb1e44c5ca9fa8))
+
+
+### Bug Fixes
+
+* bound asynchronous task polling deadline ([4f9daf9](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/4f9daf9fe19f2c8d223b74dc74b636092b20b323))
+* preserve live unmanaged workflow transitions ([332f062](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/332f0625fdd7a66aeb5274fe9de8cba4923c5adb))
+* reject empty workflow condition groups ([a94b10e](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/a94b10e225620037771aa4e1504128a45639545c))
+
 ## [0.1.6](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.5...v0.1.6) (2026-11-25)
 
 
