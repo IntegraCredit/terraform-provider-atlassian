@@ -94,7 +94,10 @@ func (r *screenTabFieldsResource) Schema(_ context.Context, _ resource.SchemaReq
 			"fields": schema.ListAttribute{
 				Description: "The IDs of the fields on the tab, in display order, for example " +
 					"`summary` or `customfield_10010`. An empty list removes every field from the tab. " +
-					"A field can be on only one tab of a screen.",
+					"A field can be on only one tab of a screen. To transfer a field between managed tabs " +
+					"on the same screen, first remove it from the source tab and apply, then add it to " +
+					"the destination tab and apply again. Changing both tabs in one apply can fail if Jira " +
+					"receives the addition before the removal, leaving the field on neither tab.",
 				Required:    true,
 				ElementType: types.StringType,
 				Validators: []validator.List{

@@ -48,7 +48,7 @@ resource "atlassian_jira_screen_tab_fields" "example" {
 
 ### Required
 
-- `fields` (List of String) The IDs of the fields on the tab, in display order, for example `summary` or `customfield_10010`. An empty list removes every field from the tab. A field can be on only one tab of a screen.
+- `fields` (List of String) The IDs of the fields on the tab, in display order, for example `summary` or `customfield_10010`. An empty list removes every field from the tab. A field can be on only one tab of a screen. To transfer a field between managed tabs on the same screen, first remove it from the source tab and apply, then add it to the destination tab and apply again. Changing both tabs in one apply can fail if Jira receives the addition before the removal, leaving the field on neither tab.
 - `screen_id` (String) The ID of the screen. Changing this forces recreation of the resource.
 - `tab_id` (String) The ID of the screen tab. Changing this forces recreation of the resource.
 
