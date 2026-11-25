@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.5...v0.1.6) (2026-11-25)
+
+
+### Features
+
+* Read and import a workflow's transitions ([1ce4311](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/1ce431117976a6d3d9400827d8ad459faba6fd46))
+* Read and import a workflow's transitions ([5ad445d](https://github.com/IntegraCredit/terraform-provider-atlassian/commit/5ad445dace917c2163506059b4a6ba52fc13c948))
+
 ## [0.1.5](https://github.com/IntegraCredit/terraform-provider-atlassian/compare/v0.1.4...v0.1.5) (2026-11-23)
 
 
