@@ -23,10 +23,14 @@ type taskResponse struct {
 // not end within taskTimeout.
 func (c *Client) WaitForTask(ctx context.Context, taskID string) error {
 	taskPath := "/rest/api/3/task/" + PathEscape(taskID)
-	deadline := time.Now().Add(taskTimeout)
+	ctx, cancel := context.WithTimeout(ctx, taskTimeout)
+	defer cancel()
 	for {
 		var task taskResponse
 		if err := c.Get(ctx, taskPath, &task); err != nil {
+			return fmt.Errorf("polling task %s: %w", taskID, err)
+		}
+		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("polling task %s: %w", taskID, err)
 		}
 
@@ -37,10 +41,6 @@ func (c *Client) WaitForTask(ctx context.Context, taskID string) error {
 		default:
 			// FAILED, CANCEL_REQUESTED, CANCELLED or DEAD.
 			return fmt.Errorf("task %s ended with status %s: %s", taskID, task.Status, task.Message)
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("task %s did not finish within %s (status %s)", taskID, taskTimeout, task.Status)
 		}
 
 		select {

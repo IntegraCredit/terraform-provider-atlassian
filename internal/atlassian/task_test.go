@@ -3,6 +3,7 @@ package atlassian
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,5 +80,29 @@ func TestWaitForTask_ContextCancelled(t *testing.T) {
 	defer cancel()
 	if err := client.WaitForTask(ctx, "10010"); err == nil {
 		t.Error("WaitForTask returned nil, want the context's error")
+	}
+}
+
+func TestWaitForTask_TimeoutDuringRequest(t *testing.T) {
+	timeout := taskTimeout
+	taskTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { taskTimeout = timeout })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/3/task/10010" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		time.Sleep(200 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"status":"COMPLETE"}`))
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewClient(ClientConfig{URL: server.URL, User: "user@example.com", Token: "token", Version: "test"})
+	if err != nil {
+		t.Fatalf("creating client: %s", err)
+	}
+
+	err = client.WaitForTask(context.Background(), "10010")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitForTask error = %v, want deadline exceeded", err)
 	}
 }
