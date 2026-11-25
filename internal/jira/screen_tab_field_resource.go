@@ -52,7 +52,9 @@ func (r *screenTabFieldResource) Metadata(_ context.Context, req resource.Metada
 
 func (r *screenTabFieldResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation.",
+		Description: "Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation. " +
+			"Jira adds the field at the end of the tab, and this resource does not manage its position. To manage the order " +
+			"of a tab's fields, use `atlassian_jira_screen_tab_fields` instead. Do not use both resources on the same tab.",
 		Attributes: map[string]schema.Attribute{
 			"screen_id": schema.StringAttribute{
 				Description: "The ID of the screen. Changing this forces recreation of the resource.",

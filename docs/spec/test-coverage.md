@@ -77,7 +77,7 @@ Full dependency order (outermost → innermost):
 1. Project associations: `project_permission_scheme`, `project_issue_type_scheme`, `project_workflow_scheme`, `project_issue_type_screen_scheme`
 2. Sub-scheme resources: `permission_scheme_grant`, `project_role_actor`
 3. Schemes: `permission_scheme`, `issue_type_scheme`, `workflow_scheme`, `issue_type_screen_scheme`, `screen_scheme`
-4. Screen hierarchy: `screen_tab_field` → `screen_tab` → `screen`
+4. Screen hierarchy: `screen_tab_field`, `screen_tab_fields` → `screen_tab` → `screen`
 5. Building blocks: `workflow`, `status`, `issue_type`, `custom_field`
 6. Fundamentals: `project_role`, `project`, `group`
 
@@ -119,6 +119,17 @@ After applying this fix, remove `ImportStateVerifyIgnore: []string{"scheme_id"}`
 
 - Unit test exists — fix existing `CheckDestroy` stub to actually verify the mock state shows scheme reverted to default after destroy
 - Destroy check (integration): GET project's issue type scheme, verify it is no longer the test scheme
+
+## Screen Tab Field Order
+
+### screen_tab_fields
+
+- API read: `GET /rest/api/3/screens/{screenId}/tabs/{tabId}/fields` — a plain JSON array of `{id, name}` in display order; 404 when the screen or the tab is gone
+- API add: `POST .../fields` — body `{"fieldId": str}`; Jira appends the field to the end of the tab, and answers 400 when the field is already on another tab of the same screen
+- API remove: `DELETE .../fields/{fieldId}`
+- API move: `POST .../fields/{fieldId}/move` — body `{"after": "<fieldId>"}` or `{"position": "First"}`; answers 204
+- `FakeScreenTabs` in `screen_tab_fields_fake_test.go` serves these four from memory. The direct tests (package `jira`, run in CI) and the `TestAcc` mock test (package `jira_test`) share it
+- Destroy check (integration): the screen is gone; a separate step drops the resource from the configuration and checks that the tab is empty
 
 ## Data Source Unit Test Patterns
 
