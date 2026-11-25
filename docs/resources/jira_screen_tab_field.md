@@ -2,12 +2,12 @@
 page_title: "atlassian_jira_screen_tab_field Resource"
 subcategory: ""
 description: |-
-    Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation.
+    Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation. Jira adds the field at the end of the tab, and this resource does not manage its position. To manage the order of a tab's fields, use atlassian_jira_screen_tab_fields instead. Do not use both resources on the same tab.
 ---
 
 # atlassian_jira_screen_tab_field (Resource)
 
-Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation.
+Adds a field to a tab on a Jira Cloud screen. All attributes are immutable; any change forces recreation. Jira adds the field at the end of the tab, and this resource does not manage its position. To manage the order of a tab's fields, use `atlassian_jira_screen_tab_fields` instead. Do not use both resources on the same tab.
 
 ## Example Usage
 

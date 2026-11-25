@@ -90,6 +90,7 @@ data "atlassian_jira_project" "existing" {
 | `atlassian_jira_screen` | Screen |
 | `atlassian_jira_screen_tab` | Screen tab |
 | `atlassian_jira_screen_tab_field` | Screen tab field |
+| `atlassian_jira_screen_tab_fields` | All fields of a screen tab, in order |
 | `atlassian_jira_screen_scheme` | Screen scheme |
 | `atlassian_jira_issue_type_screen_scheme` | Issue type screen scheme |
 | `atlassian_jira_project_issue_type_screen_scheme` | Project ↔ issue type screen scheme association |
