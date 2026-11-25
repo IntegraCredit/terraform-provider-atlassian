@@ -399,3 +399,49 @@ func TestGetWithStatus404(t *testing.T) {
 		t.Errorf("expected status 404, got %d", status)
 	}
 }
+
+func TestPostWithStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method != http.MethodPost:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case r.URL.Path == "/found" && string(body) == `{"ids":["1"]}`:
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"name":"one"}`)) //nolint:errcheck
+		case r.URL.Path == "/bad":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"errorMessages":["bad"]}`)) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{
+		URL:     server.URL,
+		User:    "user@example.com",
+		Token:   "token",
+		Version: "test",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	body := map[string][]string{"ids": {"1"}}
+
+	var found struct{ Name string }
+	status, err := client.PostWithStatus(context.Background(), "/found", body, &found)
+	if err != nil || status != http.StatusOK || found.Name != "one" {
+		t.Errorf("found: status %d, err %v, name %q; want 200, nil, \"one\"", status, err, found.Name)
+	}
+
+	status, err = client.PostWithStatus(context.Background(), "/not-found", body, &found)
+	if err != nil || status != http.StatusNotFound {
+		t.Errorf("not found: status %d, err %v; want 404 and nil", status, err)
+	}
+
+	status, err = client.PostWithStatus(context.Background(), "/bad", body, &found)
+	if err == nil || status != http.StatusBadRequest {
+		t.Errorf("bad request: status %d, err %v; want 400 and an error", status, err)
+	}
+}

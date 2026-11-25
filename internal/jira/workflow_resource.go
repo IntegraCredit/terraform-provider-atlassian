@@ -2,16 +2,15 @@ package jira
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -22,6 +21,7 @@ import (
 var (
 	_ resource.Resource                = &workflowResource{}
 	_ resource.ResourceWithImportState = &workflowResource{}
+	_ resource.ResourceWithModifyPlan  = &workflowResource{}
 )
 
 // NewWorkflowResource returns a new workflow resource.
@@ -38,6 +38,8 @@ type workflowResourceModel struct {
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
 	Statuses    types.List   `tfsdk:"statuses"`
+	Transitions types.Map    `tfsdk:"transitions"`
+	Version     types.Object `tfsdk:"version"`
 }
 
 // API request/response types
@@ -118,7 +120,12 @@ func (r *workflowResource) Metadata(_ context.Context, req resource.MetadataRequ
 
 func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a Jira Cloud workflow (structure only: name, description, statuses). Transitions are not managed in v1.",
+		Description: "Manages a Jira Cloud workflow: its name, description, statuses and transitions. " +
+			"This version reads and imports a workflow with its transitions and shows any drift in a plan. " +
+			"It cannot change an existing workflow yet: a change is planned as an in-place update, never a " +
+			"replacement, and the apply fails before it calls Jira. A new workflow is created with its " +
+			"statuses and an initial transition into the first status; `transitions` must be left out of a " +
+			"new workflow's configuration.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "The entity ID (UUID) of the workflow.",
@@ -128,27 +135,35 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				},
 			},
 			"name": schema.StringAttribute{
-				Description: "The name of the workflow. Changing this forces recreation of the resource.",
+				Description: "The name of the workflow.",
 				Required:    true,
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 			"description": schema.StringAttribute{
-				Description: "The description of the workflow. Changing this forces recreation of the resource.",
+				Description: "The description of the workflow.",
 				Optional:    true,
 				Computed:    true,
 				Default:     stringdefault.StaticString(""),
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
 			},
 			"statuses": schema.ListAttribute{
-				Description: "List of status reference UUIDs used by the workflow. Changing this forces recreation of the resource.",
+				Description: "The IDs of the statuses the workflow uses. A new workflow's initial transition " +
+					"goes to the first. When the workflow is read, the order in state is kept if Jira holds " +
+					"the same statuses; an import takes Jira's order.",
 				Required:    true,
 				ElementType: types.StringType,
-				PlanModifiers: []planmodifier.List{
-					listplanmodifier.RequiresReplace(),
+			},
+			"transitions": workflowTransitionsAttribute(),
+			"version": schema.SingleNestedAttribute{
+				Description: "The workflow's current version. Jira needs it to update the workflow.",
+				Computed:    true,
+				Attributes: map[string]schema.Attribute{
+					"id": schema.StringAttribute{
+						Description: "The version's ID.",
+						Computed:    true,
+					},
+					"number": schema.Int64Attribute{
+						Description: "The version number. Jira raises it on every change.",
+						Computed:    true,
+					},
 				},
 			},
 		},
@@ -176,6 +191,15 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 	var plan workflowResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if !plan.Transitions.IsNull() && !plan.Transitions.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(path.Root("transitions"),
+			"Creating a workflow with transitions is not supported yet",
+			"This version of the provider creates a workflow with its statuses and an initial transition "+
+				"only. Leave transitions out of the configuration to create the workflow, or import an "+
+				"existing workflow.")
 		return
 	}
 
@@ -212,8 +236,24 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	// Only take the ID from the response; preserve all other plan values.
 	plan.ID = types.StringValue(result.Workflows[0].ID)
+
+	// Read the workflow back for the values Jira sets: its transitions and version.
+	found, statusRefs, err := r.fetchWorkflow(ctx, workflowReadRequest{WorkflowIDs: []string{result.Workflows[0].ID}})
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading created workflow", err.Error())
+		return
+	}
+	if found == nil {
+		resp.Diagnostics.AddError("Error reading created workflow",
+			fmt.Sprintf("workflow %s was created but cannot be read back", result.Workflows[0].ID))
+		return
+	}
+
+	resp.Diagnostics.Append(applyWorkflowRead(ctx, &plan, found, statusRefs)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -301,7 +341,7 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	found, err := r.findWorkflowByID(ctx, state.ID.ValueString(), state.Name.ValueString())
+	found, statusIDs, err := r.fetchWorkflow(ctx, workflowReadRequest{WorkflowIDs: []string{state.ID.ValueString()}})
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading workflow", err.Error())
 		return
@@ -312,63 +352,119 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	state.ID = types.StringValue(found.ID.EntityID)
-	state.Name = types.StringValue(found.ID.Name)
-	state.Description = types.StringValue(found.Description)
-
-	// Extract status IDs from the API response. Use the numeric ID (which
-	// matches the status IDs in the configuration) rather than
-	// StatusReference (a UUID assigned by the server).
-	statusRefs := make([]string, len(found.Statuses))
-	for i, s := range found.Statuses {
-		statusRefs[i] = s.ID
-	}
-
-	statusList, diags := types.ListValueFrom(ctx, types.StringType, statusRefs)
-	resp.Diagnostics.Append(diags...)
+	resp.Diagnostics.Append(applyWorkflowRead(ctx, &state, found, statusIDs)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	state.Statuses = statusList
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// findWorkflowByID paginates the workflow search endpoint and returns the
-// workflow matching the given entity ID, or nil if not found.
-func (r *workflowResource) findWorkflowByID(ctx context.Context, entityID, name string) (*workflowAPIItem, error) {
-	// When the name is known, filter by it to reduce result set.
-	var apiPath string
-	if name != "" {
-		apiPath = fmt.Sprintf("/rest/api/3/workflow/search?workflowName=%s&expand=statuses",
-			atlassian.QueryEscape(name))
-	} else {
-		apiPath = "/rest/api/3/workflow/search?expand=statuses"
-	}
-
-	allValues, err := r.client.GetAllPages(ctx, apiPath)
+// fetchWorkflow reads one workflow through the bulk read, POST /rest/api/3/workflows.
+// It returns nil when no workflow matches; Jira answers 404 then. It also
+// returns the map from status reference to status ID.
+func (r *workflowResource) fetchWorkflow(ctx context.Context, body workflowReadRequest) (*workflowReadItem, map[string]string, error) {
+	var result workflowReadResponse
+	status, err := r.client.PostWithStatus(ctx, "/rest/api/3/workflows", body, &result)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil, nil
 	}
 
-	for _, raw := range allValues {
-		var item workflowAPIItem
-		if err := json.Unmarshal(raw, &item); err != nil {
-			return nil, fmt.Errorf("unmarshaling workflow: %w", err)
-		}
-		if item.ID.EntityID == entityID {
-			return &item, nil
+	for i := range result.Workflows {
+		wf := &result.Workflows[i]
+		if slices.Contains(body.WorkflowIDs, wf.ID) || slices.Contains(body.WorkflowNames, wf.Name) {
+			return wf, workflowStatusIDs(result.Statuses), nil
 		}
 	}
-
-	return nil, nil
+	return nil, nil, nil
 }
 
+// applyWorkflowRead copies a read workflow into the model. It keeps the
+// model's status order when Jira holds the same statuses, so a reordering on
+// Jira's side does not show up as a change.
+func applyWorkflowRead(ctx context.Context, model *workflowResourceModel, found *workflowReadItem, statusIDs map[string]string) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	transitions, err := workflowTransitionsFromAPI(*found, statusIDs)
+	if err != nil {
+		diags.AddError("Error reading workflow transitions", err.Error())
+		return diags
+	}
+	transitionsValue, err := workflowTransitionsMapValue(ctx, transitions)
+	if err != nil {
+		diags.AddError("Error reading workflow transitions", err.Error())
+		return diags
+	}
+
+	statuses := workflowStatusesFromAPI(*found, statusIDs)
+	if !model.Statuses.IsNull() && !model.Statuses.IsUnknown() {
+		var prior []string
+		diags.Append(model.Statuses.ElementsAs(ctx, &prior, false)...)
+		if diags.HasError() {
+			return diags
+		}
+		if sameStatusSet(prior, statuses) {
+			statuses = prior
+		}
+	}
+	statusList, d := types.ListValueFrom(ctx, types.StringType, statuses)
+	diags.Append(d...)
+
+	version, d := types.ObjectValueFrom(ctx, workflowVersionAttrTypes, workflowVersionValue{
+		ID:     found.Version.ID,
+		Number: found.Version.VersionNumber,
+	})
+	diags.Append(d...)
+	if diags.HasError() {
+		return diags
+	}
+
+	model.ID = types.StringValue(found.ID)
+	model.Name = types.StringValue(found.Name)
+	model.Description = types.StringValue(found.Description)
+	model.Statuses = statusList
+	model.Transitions = transitionsValue
+	model.Version = version
+	return diags
+}
+
+// ModifyPlan keeps the prior version when nothing else changes.
+//
+// When the configuration leaves out transitions, Terraform proposes null for
+// them, because their nested attributes are not all computed. The
+// transitions' UseStateForUnknown restores them, but the framework has by then
+// marked the computed version unknown, which would plan an update with no
+// change. The version only changes when the workflow does, so it stays known
+// unless another attribute is planned to change.
+func (r *workflowResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var plan, state workflowResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if plan.ID.Equal(state.ID) && plan.Name.Equal(state.Name) && plan.Description.Equal(state.Description) &&
+		plan.Statuses.Equal(state.Statuses) && plan.Transitions.Equal(state.Transitions) {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("version"), state.Version)...)
+	}
+}
+
+// Update refuses every change. It makes no API call, so a failed apply leaves
+// the workflow as it was. Replacing the workflow instead would delete a live
+// workflow, so no attribute forces a replacement.
 func (r *workflowResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
 	resp.Diagnostics.AddError(
-		"Update not supported",
-		"Jira workflows cannot be updated in v1. All fields are ForceNew.",
+		"Updating a workflow is not supported yet",
+		"This version of the provider reads a workflow, transitions included, but cannot change it. "+
+			"Nothing was changed in Jira. Revert the change in the configuration, or make it in Jira.",
 	)
 }
 
@@ -392,6 +488,22 @@ func (r *workflowResource) Delete(ctx context.Context, req resource.DeleteReques
 	}
 }
 
+// ImportState takes a workflow's entity ID or its name. It looks the ID up
+// first, then the name, and stores the entity ID; Read fills in the rest.
 func (r *workflowResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	found, _, err := r.fetchWorkflow(ctx, workflowReadRequest{WorkflowIDs: []string{req.ID}})
+	if err == nil && found == nil {
+		found, _, err = r.fetchWorkflow(ctx, workflowReadRequest{WorkflowNames: []string{req.ID}})
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("Error importing workflow", err.Error())
+		return
+	}
+	if found == nil {
+		resp.Diagnostics.AddError("Error importing workflow",
+			fmt.Sprintf("no workflow has the ID or name %q", req.ID))
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), found.ID)...)
 }

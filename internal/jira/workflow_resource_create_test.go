@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -59,6 +60,37 @@ type workflowCreateMock struct {
 	statuses      map[string]map[string]interface{}
 	statusQueries [][]string
 	createBodies  []workflowCreateWire
+	readBodies    []workflowReadRequest
+}
+
+// createdWorkflowRead answers the bulk read with the last created workflow,
+// shaped as Jira returns it.
+func (m *workflowCreateMock) createdWorkflowRead() map[string]interface{} {
+	body := m.createBodies[len(m.createBodies)-1]
+	wf := body.Workflows[0]
+	statuses := make([]map[string]interface{}, len(wf.Statuses))
+	refs := make([]map[string]interface{}, len(wf.Statuses))
+	for i, s := range wf.Statuses {
+		statuses[i] = map[string]interface{}{"id": s.StatusReference, "statusReference": s.StatusReference}
+		refs[i] = map[string]interface{}{"statusReference": s.StatusReference, "properties": map[string]string{}}
+	}
+	transitions := make([]map[string]interface{}, len(wf.Transitions))
+	for i, tr := range wf.Transitions {
+		transitions[i] = map[string]interface{}{
+			"id": tr.ID, "name": tr.Name, "description": "", "type": tr.Type,
+			"toStatusReference": tr.ToStatusReference, "links": []interface{}{},
+			"actions": []interface{}{}, "validators": []interface{}{}, "triggers": []interface{}{},
+			"properties": map[string]string{},
+		}
+	}
+	return map[string]interface{}{
+		"statuses": statuses,
+		"workflows": []interface{}{map[string]interface{}{
+			"id": createdWorkflowID, "name": wf.Name, "description": wf.Description,
+			"version":  map[string]interface{}{"id": "11111111-2222-3333-4444-555555555555", "versionNumber": 0},
+			"statuses": refs, "transitions": transitions,
+		}},
+	}
 }
 
 func (m *workflowCreateMock) client(t *testing.T) *atlassian.Client {
@@ -98,6 +130,20 @@ func (m *workflowCreateMock) client(t *testing.T) *atlassian.Client {
 				},
 			})
 
+		case r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/workflows":
+			var body workflowReadRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			m.readBodies = append(m.readBodies, body)
+			if len(m.createBodies) == 0 || !slices.Equal(body.WorkflowIDs, []string{createdWorkflowID}) {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(m.createdWorkflowRead()) //nolint:errcheck
+
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -116,7 +162,13 @@ func (m *workflowCreateMock) client(t *testing.T) *atlassian.Client {
 }
 
 // createWorkflow runs the resource's Create with a plan for the given statuses.
+// The plan's transitions are unknown, as when the configuration leaves them out.
 func createWorkflow(t *testing.T, r *workflowResource, name, description string, statusIDs []string) resource.CreateResponse {
+	t.Helper()
+	return createWorkflowWithTransitions(t, r, name, description, statusIDs, types.MapUnknown(workflowTransitionObjectType()))
+}
+
+func createWorkflowWithTransitions(t *testing.T, r *workflowResource, name, description string, statusIDs []string, transitions types.Map) resource.CreateResponse {
 	t.Helper()
 	ctx := context.Background()
 
@@ -135,6 +187,8 @@ func createWorkflow(t *testing.T, r *workflowResource, name, description string,
 		Name:        types.StringValue(name),
 		Description: types.StringValue(description),
 		Statuses:    statuses,
+		Transitions: transitions,
+		Version:     types.ObjectUnknown(workflowVersionAttrTypes),
 	})
 	if diags.HasError() {
 		t.Fatalf("building plan: %v", diags)
@@ -217,6 +271,49 @@ func TestWorkflowResourceCreate_UsesBulkCreateAPI(t *testing.T) {
 	got.Statuses.ElementsAs(context.Background(), &gotStatuses, false)
 	if !slices.Equal(gotStatuses, []string{"10001", "10000"}) {
 		t.Errorf("state statuses = %v, want [10001 10000]", gotStatuses)
+	}
+
+	// The workflow is read back for its transitions and version.
+	if len(mock.readBodies) != 1 || !slices.Equal(mock.readBodies[0].WorkflowIDs, []string{createdWorkflowID}) {
+		t.Errorf("reads = %+v, want one read of %s", mock.readBodies, createdWorkflowID)
+	}
+	var transitions map[string]workflowTransitionValue
+	if diags := resp.State.GetAttribute(context.Background(), path.Root("transitions"), &transitions); diags.HasError() {
+		t.Fatalf("reading transitions: %v", diags)
+	}
+	if tr, ok := transitions["1"]; len(transitions) != 1 || !ok || tr.Type != "INITIAL" || tr.To == nil || *tr.To != "10001" {
+		t.Errorf("state transitions = %+v, want the initial transition into 10001", transitions)
+	}
+	if got.Version.IsNull() || got.Version.IsUnknown() {
+		t.Errorf("state version = %s, want it read back", got.Version)
+	}
+}
+
+// TestWorkflowResourceCreate_RefusesTransitions stops before any request when
+// the configuration sets transitions, which Create cannot send yet.
+func TestWorkflowResourceCreate_RefusesTransitions(t *testing.T) {
+	mock := &workflowCreateMock{statuses: map[string]map[string]interface{}{
+		"10000": {"id": "10000", "name": "To Do", "statusCategory": "TODO"},
+	}}
+	r := &workflowResource{client: mock.client(t)}
+
+	transitions, diags := types.MapValueFrom(context.Background(), workflowTransitionObjectType(),
+		map[string]workflowTransitionValue{"1": {
+			Name: "Create", Type: "INITIAL", From: []string{}, To: strPtr("10000"),
+			Validators: []workflowRuleValue{}, Actions: []workflowRuleValue{}, Triggers: []workflowRuleValue{},
+			Properties: map[string]string{},
+		}})
+	if diags.HasError() {
+		t.Fatalf("building transitions: %v", diags)
+	}
+
+	resp := createWorkflowWithTransitions(t, r, "tf-test-workflow", "", []string{"10000"}, transitions)
+	if !resp.Diagnostics.HasError() ||
+		!strings.Contains(resp.Diagnostics.Errors()[0].Summary(), "not supported yet") {
+		t.Fatalf("diagnostics = %v, want a not supported error", resp.Diagnostics)
+	}
+	if len(mock.statusQueries) != 0 || len(mock.createBodies) != 0 {
+		t.Errorf("requests: %d status lookups, %d creates; want none", len(mock.statusQueries), len(mock.createBodies))
 	}
 }
 

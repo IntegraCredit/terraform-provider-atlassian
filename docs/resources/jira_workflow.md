@@ -2,21 +2,86 @@
 page_title: "atlassian_jira_workflow Resource"
 subcategory: ""
 description: |-
-    Manages a Jira Cloud workflow (structure only: name, description, statuses). Transitions are not managed in v1.
+    Manages a Jira Cloud workflow: its name, description, statuses and transitions. This version reads and imports a workflow with its transitions and shows any drift in a plan. It cannot change an existing workflow yet: a change is planned as an in-place update, never a replacement, and the apply fails before it calls Jira. A new workflow is created with its statuses and an initial transition into the first status; transitions must be left out of a new workflow's configuration.
 ---
 
 # atlassian_jira_workflow (Resource)
 
-Manages a Jira Cloud workflow (structure only: name, description, statuses). Transitions are not managed in v1.
+Manages a Jira Cloud workflow: its name, description, statuses and transitions. This version reads and imports a workflow with its transitions and shows any drift in a plan. It cannot change an existing workflow yet: a change is planned as an in-place update, never a replacement, and the apply fails before it calls Jira. A new workflow is created with its statuses and an initial transition into the first status; `transitions` must be left out of a new workflow's configuration.
 
 ## Example Usage
 
 ```terraform
+# A new workflow: its statuses, and an initial transition into the first one.
 resource "atlassian_jira_workflow" "example" {
   name = "Example Workflow"
   statuses = [
     atlassian_jira_status.example.id,
   ]
+}
+
+# An existing workflow, imported with its transitions. Changing an existing
+# workflow is not supported yet: a change plans an in-place update, and the
+# apply fails without changing anything.
+import {
+  to = atlassian_jira_workflow.development
+  id = "Development Workflow" # the workflow's name or entity ID
+}
+
+resource "atlassian_jira_workflow" "development" {
+  name     = "Development Workflow"
+  statuses = ["10000", "3", "10001"]
+
+  transitions = {
+    "1" = {
+      name = "Create"
+      type = "INITIAL"
+      to   = "10000"
+      validators = [{
+        rule_key   = "system:check-permission-validator"
+        parameters = { permissionKey = "CREATE_ISSUES" }
+      }]
+    }
+
+    "11" = {
+      name = "Start progress"
+      type = "DIRECTED"
+      from = ["10000"]
+      to   = "3"
+      conditions = {
+        operation = "ANY"
+        rules = [{
+          rule_key = "system:restrict-issue-transition"
+          parameters = {
+            accountIds            = "allow-assignee"
+            roleIds               = ""
+            groupIds              = ""
+            permissionKeys        = ""
+            groupCustomFields     = ""
+            allowUserCustomFields = ""
+            denyUserCustomFields  = ""
+          }
+        }]
+      }
+    }
+
+    "21" = {
+      name = "Done"
+      type = "DIRECTED"
+      from = ["10000", "3"]
+      to   = "10001"
+      actions = [{
+        rule_key   = "system:update-field"
+        parameters = { field = "resolution", value = "10000", mode = "replace" }
+      }]
+    }
+
+    "31" = {
+      name = "Reopen"
+      type = "GLOBAL"
+      to   = "10000"
+    }
+  }
 }
 ```
 
@@ -25,13 +90,163 @@ resource "atlassian_jira_workflow" "example" {
 
 ### Required
 
-- `name` (String) The name of the workflow. Changing this forces recreation of the resource.
-- `statuses` (List of String) List of status reference UUIDs used by the workflow. Changing this forces recreation of the resource.
+- `name` (String) The name of the workflow.
+- `statuses` (List of String) The IDs of the statuses the workflow uses. A new workflow's initial transition goes to the first. When the workflow is read, the order in state is kept if Jira holds the same statuses; an import takes Jira's order.
 
 ### Optional
 
-- `description` (String) The description of the workflow. Changing this forces recreation of the resource.
+- `description` (String) The description of the workflow.
+- `transitions` (Attributes Map) The workflow's transitions, keyed by transition ID. Leave it out to ignore the transitions; they are still read into state. (see [below for nested schema](#nestedatt--transitions))
 
 ### Read-Only
 
 - `id` (String) The entity ID (UUID) of the workflow.
+- `version` (Attributes) The workflow's current version. Jira needs it to update the workflow. (see [below for nested schema](#nestedatt--version))
+
+<a id="nestedatt--transitions"></a>
+### Nested Schema for `transitions`
+
+Required:
+
+- `name` (String) The transition's name.
+- `type` (String) `INITIAL` (creates the issue), `DIRECTED` (from the statuses in `from`) or `GLOBAL` (from any status).
+
+Optional:
+
+- `actions` (Attributes List) The transition's post functions, in the order they run. Defaults to none. (see [below for nested schema](#nestedatt--transitions--actions))
+- `conditions` (Attributes) The transition's conditions, as a group of rules and nested groups. Jira reads a group with no rules and no groups as no conditions. (see [below for nested schema](#nestedatt--transitions--conditions))
+- `description` (String) The transition's description. Defaults to an empty string.
+- `from` (Set of String) The IDs of the statuses a `DIRECTED` transition starts from. Empty for `INITIAL` and `GLOBAL` transitions, which is the default.
+- `properties` (Map of String) The transition's properties. Defaults to none.
+- `to` (String) The ID of the status the transition goes to.
+- `triggers` (Attributes List) The transition's triggers. Defaults to none. (see [below for nested schema](#nestedatt--transitions--triggers))
+- `validators` (Attributes List) The transition's validators. Defaults to none. (see [below for nested schema](#nestedatt--transitions--validators))
+
+<a id="nestedatt--transitions--actions"></a>
+### Nested Schema for `transitions.actions`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+<a id="nestedatt--transitions--conditions"></a>
+### Nested Schema for `transitions.conditions`
+
+Required:
+
+- `operation` (String) `ALL` passes when every rule and group in this group passes; `ANY` when at least one does.
+
+Optional:
+
+- `groups` (Attributes List) Condition groups nested in this group. The provider holds 3 levels of groups; reading a workflow nested deeper fails. Defaults to none. (see [below for nested schema](#nestedatt--transitions--conditions--groups))
+- `rules` (Attributes List) The conditions in this group. Defaults to none. (see [below for nested schema](#nestedatt--transitions--conditions--rules))
+
+<a id="nestedatt--transitions--conditions--groups"></a>
+### Nested Schema for `transitions.conditions.groups`
+
+Required:
+
+- `operation` (String) `ALL` passes when every rule and group in this group passes; `ANY` when at least one does.
+
+Optional:
+
+- `groups` (Attributes List) Condition groups nested in this group. The provider holds 3 levels of groups; reading a workflow nested deeper fails. Defaults to none. (see [below for nested schema](#nestedatt--transitions--conditions--groups--groups))
+- `rules` (Attributes List) The conditions in this group. Defaults to none. (see [below for nested schema](#nestedatt--transitions--conditions--groups--rules))
+
+<a id="nestedatt--transitions--conditions--groups--groups"></a>
+### Nested Schema for `transitions.conditions.groups.groups`
+
+Required:
+
+- `operation` (String) `ALL` passes when every rule and group in this group passes; `ANY` when at least one does.
+
+Optional:
+
+- `rules` (Attributes List) The conditions in this group. Defaults to none. (see [below for nested schema](#nestedatt--transitions--conditions--groups--groups--rules))
+
+<a id="nestedatt--transitions--conditions--groups--groups--rules"></a>
+### Nested Schema for `transitions.conditions.groups.groups.rules`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+
+<a id="nestedatt--transitions--conditions--groups--rules"></a>
+### Nested Schema for `transitions.conditions.groups.rules`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+
+<a id="nestedatt--transitions--conditions--rules"></a>
+### Nested Schema for `transitions.conditions.rules`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+
+<a id="nestedatt--transitions--triggers"></a>
+### Nested Schema for `transitions.triggers`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+<a id="nestedatt--transitions--validators"></a>
+### Nested Schema for `transitions.validators`
+
+Required:
+
+- `rule_key` (String) The rule's key, for example `system:update-field`.
+
+Optional:
+
+- `parameters` (Map of String) The rule's parameters, exactly as Jira stores them. Jira often stores parameters with empty values; list those too. Defaults to none.
+
+
+
+<a id="nestedatt--version"></a>
+### Nested Schema for `version`
+
+Read-Only:
+
+- `id` (String) The version's ID.
+- `number` (Number) The version number. Jira raises it on every change.
+
+## Import
+
+Import is supported using the following syntax:
+
+```shell
+# Import a workflow by its entity ID or by its name.
+terraform import atlassian_jira_workflow.development 4d8f5a78-e5e2-4357-8757-5b04a3c719e7
+terraform import atlassian_jira_workflow.development "Development Workflow"
+```
