@@ -217,7 +217,8 @@ func updatePlan(t *testing.T, state tfsdk.State, edit func(m *workflowResourceMo
 
 func runUpdate(r *workflowResource, state tfsdk.State, plan tfsdk.Plan) resource.UpdateResponse {
 	resp := resource.UpdateResponse{State: tfsdk.State{Schema: state.Schema, Raw: plan.Raw.Copy()}}
-	r.Update(context.Background(), resource.UpdateRequest{Plan: plan, State: state}, &resp)
+	config := tfsdk.Config{Schema: plan.Schema, Raw: plan.Raw.Copy()}
+	r.Update(context.Background(), resource.UpdateRequest{Plan: plan, State: state, Config: config}, &resp)
 	return resp
 }
 
@@ -537,6 +538,143 @@ func TestWorkflowResourceUpdate_KeepsTransitionsLeftOut(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		gotPretty, _ := json.MarshalIndent(got, "", "  ")
 		t.Errorf("transitions = %s", gotPretty)
+	}
+}
+
+func TestWorkflowResourceUpdate_KeepsLiveTransitionsAfterPlanning(t *testing.T) {
+	for _, useModifiedPlan := range []bool{false, true} {
+		t.Run(map[bool]string{false: "state-derived plan", true: "modified plan"}[useModifiedPlan], func(t *testing.T) {
+			mock, r, state := newUpdateMock(t)
+			ctx := context.Background()
+			plan := updatePlan(t, state, func(m *workflowResourceModel, tr map[string]workflowTransitionValue) map[string]workflowTransitionValue {
+				m.Description = types.StringValue("Updated description")
+				return tr
+			})
+			configPlan := updatePlan(t, state, func(m *workflowResourceModel, _ map[string]workflowTransitionValue) map[string]workflowTransitionValue {
+				m.Description = types.StringValue("Updated description")
+				return nil
+			})
+			config := tfsdk.Config{Schema: configPlan.Schema, Raw: configPlan.Raw.Copy()}
+			modified := resource.ModifyPlanResponse{Plan: plan}
+			r.ModifyPlan(ctx, resource.ModifyPlanRequest{Plan: plan, State: state, Config: config}, &modified)
+			if modified.Diagnostics.HasError() {
+				t.Fatalf("ModifyPlan: %v", modified.Diagnostics)
+			}
+			var plannedTransitions types.Map
+			if diags := modified.Plan.GetAttribute(ctx, path.Root("transitions"), &plannedTransitions); diags.HasError() {
+				t.Fatal(diags)
+			}
+			if !plannedTransitions.IsUnknown() {
+				t.Fatal("unconfigured transitions must be unknown during an update")
+			}
+			if useModifiedPlan {
+				plan = modified.Plan
+			}
+
+			var doc map[string]interface{}
+			if err := json.Unmarshal(mock.doc, &doc); err != nil {
+				t.Fatal(err)
+			}
+			wf := doc["workflows"].([]interface{})[0].(map[string]interface{})
+			transitions := wf["transitions"].([]interface{})
+			var changed map[string]interface{}
+			for _, transition := range transitions {
+				candidate := transition.(map[string]interface{})
+				if candidate["id"] == "11" {
+					changed = candidate
+					break
+				}
+			}
+			if changed == nil {
+				t.Fatal("fixture is missing transition 11")
+			}
+			changed["name"] = "Live edit"
+			added := make(map[string]interface{}, len(changed))
+			for key, value := range changed {
+				added[key] = value
+			}
+			added["id"], added["name"] = "41", "Live addition"
+			wf["transitions"] = append(transitions, added)
+			var err error
+			mock.doc, err = json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			resp := resource.UpdateResponse{State: tfsdk.State{Schema: state.Schema, Raw: plan.Raw.Copy()}}
+			r.Update(ctx, resource.UpdateRequest{Plan: plan, State: state, Config: config}, &resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("Update: %v", resp.Diagnostics)
+			}
+			var body workflowUpdateRequest
+			if err := json.Unmarshal(mock.updates[0], &body); err != nil {
+				t.Fatal(err)
+			}
+			names := map[string]string{}
+			for _, tr := range body.Workflows[0].Transitions {
+				names[tr.ID] = tr.Name
+			}
+			if names["11"] != "Live edit" || names["41"] != "Live addition" {
+				t.Errorf("sent transitions = %v, want live edits", names)
+			}
+			var got map[string]workflowTransitionValue
+			if diags := resp.State.GetAttribute(ctx, path.Root("transitions"), &got); diags.HasError() {
+				t.Fatal(diags)
+			}
+			if got["11"].Name != "Live edit" || got["41"].Name != "Live addition" {
+				t.Errorf("state transitions = %v, want live edits", got)
+			}
+		})
+	}
+}
+
+func TestWorkflowResourceModifyPlan_ConfiguredTransitionsRemainKnown(t *testing.T) {
+	_, r, state := newUpdateMock(t)
+	ctx := context.Background()
+	plan := updatePlan(t, state, func(m *workflowResourceModel, tr map[string]workflowTransitionValue) map[string]workflowTransitionValue {
+		m.Description = types.StringValue("Updated description")
+		return tr
+	})
+	config := tfsdk.Config{Schema: plan.Schema, Raw: plan.Raw.Copy()}
+	resp := resource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(ctx, resource.ModifyPlanRequest{Plan: plan, State: state, Config: config}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan: %v", resp.Diagnostics)
+	}
+	var got, want types.Map
+	resp.Diagnostics.Append(resp.Plan.GetAttribute(ctx, path.Root("transitions"), &got)...)
+	resp.Diagnostics.Append(plan.GetAttribute(ctx, path.Root("transitions"), &want)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	if !got.Equal(want) {
+		t.Error("configured transitions should remain in the plan")
+	}
+}
+
+func TestWorkflowResourceModifyPlan_UnconfiguredTransitionsNoChange(t *testing.T) {
+	_, r, state := newUpdateMock(t)
+	ctx := context.Background()
+	plan := updatePlan(t, state, func(_ *workflowResourceModel, tr map[string]workflowTransitionValue) map[string]workflowTransitionValue {
+		return tr
+	})
+	configPlan := updatePlan(t, state, func(_ *workflowResourceModel, _ map[string]workflowTransitionValue) map[string]workflowTransitionValue {
+		return nil
+	})
+	config := tfsdk.Config{Schema: configPlan.Schema, Raw: configPlan.Raw.Copy()}
+	resp := resource.ModifyPlanResponse{Plan: plan}
+	r.ModifyPlan(ctx, resource.ModifyPlanRequest{Plan: plan, State: state, Config: config}, &resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("ModifyPlan: %v", resp.Diagnostics)
+	}
+	var got, prior workflowResourceModel
+	resp.Diagnostics.Append(resp.Plan.Get(ctx, &got)...)
+	resp.Diagnostics.Append(state.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		t.Fatal(resp.Diagnostics)
+	}
+	if !got.Transitions.Equal(prior.Transitions) || !got.Version.Equal(prior.Version) {
+		t.Error("unchanged workflow should retain its transitions and version in the plan")
 	}
 }
 

@@ -446,7 +446,8 @@ func applyWorkflowRead(ctx context.Context, model *workflowResourceModel, found 
 // transitions' UseStateForUnknown restores them, but the framework has by then
 // marked the computed version unknown, which would plan an update with no
 // change. The version only changes when the workflow does, so it stays known
-// unless another attribute is planned to change.
+// unless another attribute is planned to change. On an update, unconfigured
+// transitions must remain unknown so the live values can be saved in state.
 func (r *workflowResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
 		return
@@ -467,6 +468,17 @@ func (r *workflowResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
 	if plan.ID.Equal(state.ID) && plan.Name.Equal(state.Name) && plan.Description.Equal(state.Description) &&
 		plan.Statuses.Equal(state.Statuses) && plan.Transitions.Equal(state.Transitions) {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("version"), state.Version)...)
+		return
+	}
+
+	var configuredTransitions types.Map
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("transitions"), &configuredTransitions)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if configuredTransitions.IsNull() {
+		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, path.Root("transitions"),
+			types.MapUnknown(workflowTransitionObjectType()))...)
 	}
 }
 
@@ -520,8 +532,13 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	// Transitions left out of the configuration keep what Jira holds.
+	var configuredTransitions types.Map
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("transitions"), &configuredTransitions)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	var transitions map[string]workflowTransitionValue
-	if plan.Transitions.IsNull() || plan.Transitions.IsUnknown() {
+	if configuredTransitions.IsNull() || plan.Transitions.IsNull() || plan.Transitions.IsUnknown() {
 		transitions, err = workflowTransitionsFromAPI(*live, liveIDs)
 		if err != nil {
 			resp.Diagnostics.AddError("Error reading workflow transitions", err.Error())
