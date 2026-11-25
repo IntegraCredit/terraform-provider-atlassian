@@ -114,7 +114,7 @@ Required:
 Optional:
 
 - `actions` (Attributes List) The transition's post functions, in the order they run. Defaults to none. (see [below for nested schema](#nestedatt--transitions--actions))
-- `conditions` (Attributes) The transition's conditions, as a group of rules and nested groups. Jira reads a group with no rules and no groups as no conditions. (see [below for nested schema](#nestedatt--transitions--conditions))
+- `conditions` (Attributes) The transition's conditions, as a group of rules and nested groups. Omit conditions instead of specifying a group with no rules and no groups. (see [below for nested schema](#nestedatt--transitions--conditions))
 - `description` (String) The transition's description. Defaults to an empty string.
 - `from` (Set of String) The IDs of the statuses a `DIRECTED` transition starts from. Empty for `INITIAL` and `GLOBAL` transitions, which is the default.
 - `properties` (Map of String) The transition's properties. Defaults to none.

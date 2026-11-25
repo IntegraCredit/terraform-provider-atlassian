@@ -249,6 +249,9 @@ func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 	}
 	renamed := transitionsFixtureConfig(transitionsFixtureName+"-renamed", "Done")
 	badTransitionID := strings.Replace(config, `"11" = {`, `"open" = {`, 1)
+	emptyConditions := strings.Replace(config, `name = "Done"`, "name = \"Done\"\n      conditions = { operation = \"ALL\" }", 1)
+	explicitEmptyConditions := strings.Replace(config, `name = "Done"`,
+		"name = \"Done\"\n      conditions = { operation = \"ALL\", rules = [], groups = [] }", 1)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
@@ -312,6 +315,14 @@ func TestAccWorkflowResource_ImportTransitions(t *testing.T) {
 			{
 				Config:      badTransitionID,
 				ExpectError: regexp.MustCompile(`must be a transition ID`),
+			},
+			{
+				Config:      emptyConditions,
+				ExpectError: regexp.MustCompile(`Empty condition group`),
+			},
+			{
+				Config:      explicitEmptyConditions,
+				ExpectError: regexp.MustCompile(`Empty condition group`),
 			},
 			// A changed transition is an in-place update. Applied, it plans no changes.
 			{

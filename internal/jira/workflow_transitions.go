@@ -29,6 +29,31 @@ var transitionIDPattern = regexp.MustCompile(`^[0-9]+$`)
 // Jira itself sets no limit, but a schema cannot refer to itself.
 const maxConditionDepth = 3
 
+type workflowConditionGroupValidator struct{}
+
+func (workflowConditionGroupValidator) Description(_ context.Context) string {
+	return "A condition group must contain at least one rule or nested group."
+}
+
+func (v workflowConditionGroupValidator) MarkdownDescription(ctx context.Context) string {
+	return v.Description(ctx)
+}
+
+func (workflowConditionGroupValidator) ValidateObject(_ context.Context, req validator.ObjectRequest, resp *validator.ObjectResponse) {
+	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	attrs := req.ConfigValue.Attributes()
+	for _, name := range []string{"rules", "groups"} {
+		list, ok := attrs[name].(types.List)
+		if !ok || list.IsUnknown() || (!list.IsNull() && len(list.Elements()) > 0) {
+			return
+		}
+	}
+	resp.Diagnostics.AddAttributeError(req.Path, "Empty condition group",
+		"A condition group must contain at least one rule or nested group. Omit conditions instead when there are no conditions.")
+}
+
 // API types for POST /rest/api/3/workflows, the bulk workflow read.
 
 type workflowReadRequest struct {
@@ -279,9 +304,10 @@ func workflowTransitionsAttribute() schema.MapNestedAttribute {
 				},
 				"conditions": schema.SingleNestedAttribute{
 					Description: "The transition's conditions, as a group of rules and nested groups. " +
-						"Jira reads a group with no rules and no groups as no conditions.",
+						"Omit conditions instead of specifying a group with no rules and no groups.",
 					Optional:   true,
 					Attributes: workflowConditionGroupAttributes(1),
+					Validators: []validator.Object{workflowConditionGroupValidator{}},
 				},
 				"validators": workflowRuleListAttribute("The transition's validators."),
 				"actions":    workflowRuleListAttribute("The transition's post functions, in the order they run."),
