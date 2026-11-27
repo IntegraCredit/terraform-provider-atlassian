@@ -17,7 +17,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
-	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/lbajsarowicz/terraform-provider-atlassian/internal/atlassian"
 )
@@ -133,7 +132,13 @@ func (r *screenTabFieldsResource) Create(ctx context.Context, req resource.Creat
 		return
 	}
 
-	r.apply(ctx, &plan, &resp.State, &resp.Diagnostics)
+	// Save state only when the apply succeeded. A Create that fails with state saved
+	// leaves the resource tainted, and the next apply destroys it first, which removes
+	// every field from the tab. Without state, the next apply runs Create again, and
+	// Create reconciles the tab.
+	if r.apply(ctx, &plan, &resp.Diagnostics) && !resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
 }
 
 func (r *screenTabFieldsResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -170,7 +175,11 @@ func (r *screenTabFieldsResource) Update(ctx context.Context, req resource.Updat
 		return
 	}
 
-	r.apply(ctx, &plan, &resp.State, &resp.Diagnostics)
+	// Save Jira's fields even when their order does not match. An Update error does not
+	// taint the resource, and the next plan shows the difference.
+	if r.apply(ctx, &plan, &resp.Diagnostics) {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
 }
 
 func (r *screenTabFieldsResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -218,13 +227,16 @@ func (r *screenTabFieldsResource) ImportState(ctx context.Context, req resource.
 }
 
 // apply makes the tab hold exactly the planned fields in the planned order, then
-// records what Jira reports. It removes the fields that are not planned first, then
-// adds the missing ones (Jira appends them), then moves the fields that are out of order.
-func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFieldsResourceModel, state *tfsdk.State, diags *diag.Diagnostics) {
+// writes what Jira reports into plan. It removes the fields that are not planned first,
+// then adds the missing ones (Jira appends them), then moves the fields that are out of
+// order. It returns true when plan holds the fields Jira reports, which is also the case
+// when Jira's order does not match the configuration and diags holds that error. The
+// caller decides whether to save plan as state.
+func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFieldsResourceModel, diags *diag.Diagnostics) bool {
 	var desired []string
 	diags.Append(plan.Fields.ElementsAs(ctx, &desired, false)...)
 	if diags.HasError() {
-		return
+		return false
 	}
 
 	screenID := plan.ScreenID.ValueString()
@@ -233,14 +245,14 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 	current, found, err := r.readFields(ctx, screenID, tabID)
 	if err != nil {
 		diags.AddError("Error reading screen tab fields", err.Error())
-		return
+		return false
 	}
 	if !found {
 		diags.AddError(
 			"Screen tab not found",
 			fmt.Sprintf("Jira found no tab %s on screen %s.", tabID, screenID),
 		)
-		return
+		return false
 	}
 
 	want := make(map[string]bool, len(desired))
@@ -261,7 +273,7 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 				"Error removing field from screen tab",
 				fmt.Sprintf("Removing field %q from screen %s tab %s: %s", fieldID, screenID, tabID, err),
 			)
-			return
+			return false
 		}
 	}
 
@@ -274,7 +286,7 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 				"Error adding field to screen tab",
 				fmt.Sprintf("Adding field %q to screen %s tab %s: %s", fieldID, screenID, tabID, err),
 			)
-			return
+			return false
 		}
 		working = append(working, fieldID)
 	}
@@ -289,26 +301,25 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 				"Error moving field on screen tab",
 				fmt.Sprintf("Moving field %q on screen %s tab %s: %s", move.FieldID, screenID, tabID, err),
 			)
-			return
+			return false
 		}
 	}
 
 	final, found, err := r.readFields(ctx, screenID, tabID)
 	if err != nil {
 		diags.AddError("Error reading screen tab fields", err.Error())
-		return
+		return false
 	}
 	if !found {
 		diags.AddError(
 			"Screen tab not found",
 			fmt.Sprintf("Jira found no tab %s on screen %s after changing its fields.", tabID, screenID),
 		)
-		return
+		return false
 	}
 
 	plan.ID = types.StringValue(screenTabFieldsID(screenID, tabID))
 	plan.Fields = screenTabFieldsList(final)
-	diags.Append(state.Set(ctx, plan)...)
 
 	if !slices.Equal(final, desired) {
 		diags.AddError(
@@ -317,6 +328,7 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 				screenID, tabID, final, desired),
 		)
 	}
+	return true
 }
 
 // readFields returns the IDs of the fields on a tab, in display order. found is
