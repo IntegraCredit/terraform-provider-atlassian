@@ -222,6 +222,29 @@ func TestScreenTabFieldsCreate_TakesOverTab(t *testing.T) {
 	}
 }
 
+// TestScreenTabFieldsCreate_OrderJiraDidNotKeepSavesNoState fails without saving state.
+// Saved state would taint the resource, and the next apply would empty the tab before
+// adding the fields back. Without state, the next apply runs Create again.
+func TestScreenTabFieldsCreate_OrderJiraDidNotKeepSavesNoState(t *testing.T) {
+	fake := NewFakeScreenTabs(t)
+	fake.SetFields(tabFieldsScreenID, tabFieldsTabID, "summary", "description")
+	fake.IgnoreMoves()
+	r := newTabFieldsResource(t, fake)
+
+	plan := tabFieldsPlan(t, r, "description", "summary")
+	resp := resource.CreateResponse{State: tabFieldsState(t, r, nil)}
+	r.Create(context.Background(), resource.CreateRequest{Plan: plan}, &resp)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Create succeeded, want an error about the order")
+	}
+	if got := resp.Diagnostics.Errors()[0].Summary(); got != "Screen tab fields do not match the configuration" {
+		t.Errorf("error summary = %q", got)
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Errorf("state = %s, want null", resp.State.Raw)
+	}
+}
+
 // TestScreenTabFieldsCreate_MissingTab fails before any write.
 func TestScreenTabFieldsCreate_MissingTab(t *testing.T) {
 	fake := NewFakeScreenTabs(t)
