@@ -237,6 +237,163 @@ func TestAccScreenResource_Read_NotFound(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestAccScreenResource_defaultTabID — the tab Jira creates with a screen is
+// recorded on create, kept through a rename, an import and a new first tab,
+// and cleared once it is deleted
+// ---------------------------------------------------------------------------
+
+func TestAccScreenResource_defaultTabID(t *testing.T) {
+	var mu sync.Mutex
+	screens := map[string]map[string]interface{}{}
+	tabs := map[string][]map[string]interface{}{}
+	var nextID atomic.Int64
+	nextID.Store(2000)
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		// Like Jira, a new screen comes with one tab.
+		case r.Method == "POST" && r.URL.Path == "/rest/api/3/screens":
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			id := nextID.Add(1)
+			screenID := fmt.Sprintf("%d", id)
+			screens[screenID] = screenJSON(id, body["name"], body["description"])
+			tabs[screenID] = []map[string]interface{}{tabJSON(id*10, "Field Tab")}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(screens[screenID])
+
+		case r.Method == "GET" && isTabsListPath(r.URL.Path):
+			screenID := strings.Split(strings.TrimPrefix(r.URL.Path, "/rest/api/3/screens/"), "/")[0]
+			if _, ok := screens[screenID]; !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(tabs[screenID])
+
+		case r.Method == "PUT" && strings.HasPrefix(r.URL.Path, "/rest/api/3/screens/"):
+			screenID := strings.TrimPrefix(r.URL.Path, "/rest/api/3/screens/")
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			s, ok := screens[screenID]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			s["name"] = body["name"]
+			s["description"] = body["description"]
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(s)
+
+		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/rest/api/3/screens/"):
+			screenID := strings.TrimPrefix(r.URL.Path, "/rest/api/3/screens/")
+			delete(screens, screenID)
+			delete(tabs, screenID)
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == "GET" && r.URL.Path == "/rest/api/3/screens":
+			all := make([]map[string]interface{}, 0, len(screens))
+			for _, s := range screens {
+				all = append(all, s)
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"values":  all,
+				"isLast":  true,
+				"startAt": 0, "maxResults": 100, "total": len(all),
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("ATLASSIAN_URL", mockServer.URL)
+	t.Setenv("ATLASSIAN_USER", "test@test.com")
+	t.Setenv("ATLASSIAN_TOKEN", "test-token")
+
+	const addr = "atlassian_jira_screen.test"
+	config := func(name string) string {
+		return fmt.Sprintf(`resource "atlassian_jira_screen" "test" {
+			name = %q
+		}`, name)
+	}
+	// The mock gives screen N the tab N*10.
+	checkJiraDefaultTab := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[addr]
+		if !ok {
+			return fmt.Errorf("%s not found in state", addr)
+		}
+		want := rs.Primary.ID + "0"
+		if got := rs.Primary.Attributes["default_tab_id"]; got != want {
+			return fmt.Errorf("default_tab_id = %q, want %q", got, want)
+		}
+		return nil
+	}
+	currentScreenID := func() string { return fmt.Sprintf("%d", nextID.Load()) }
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
+		CheckDestroy: func(s *terraform.State) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if len(screens) != 0 {
+				return fmt.Errorf("%d screens left after destroy", len(screens))
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: config("Default Tab Screen"),
+				Check:  checkJiraDefaultTab,
+			},
+			{
+				Config: config("Renamed Default Tab Screen"),
+				Check:  checkJiraDefaultTab,
+			},
+			{
+				ResourceName:      addr,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				// A tab added in front of the default one does not change it.
+				PreConfig: func() {
+					mu.Lock()
+					defer mu.Unlock()
+					screenID := currentScreenID()
+					tabs[screenID] = append([]map[string]interface{}{tabJSON(1, "Moved First")}, tabs[screenID]...)
+				},
+				RefreshState: true,
+				Check:        checkJiraDefaultTab,
+			},
+			{
+				// Deleting the default tab out of band clears the attribute.
+				PreConfig: func() {
+					mu.Lock()
+					defer mu.Unlock()
+					screenID := currentScreenID()
+					tabs[screenID] = tabs[screenID][:1]
+				},
+				RefreshState: true,
+				Check:        resource.TestCheckNoResourceAttr(addr, "default_tab_id"),
+			},
+		},
+	})
+}
+
+// ---------------------------------------------------------------------------
 // TestAccScreenTabResource_basic — create screen → create tab → verify → import
 // ---------------------------------------------------------------------------
 

@@ -101,6 +101,81 @@ func TestIntegrationScreenResource_basic(t *testing.T) {
 	})
 }
 
+// TestIntegrationScreenResource_defaultTab puts fields on the tab Jira creates
+// with a screen, and checks that the screen still has only that tab.
+func TestIntegrationScreenResource_defaultTab(t *testing.T) {
+	testutil.SkipIfNoAcc(t)
+	rName := acctest.RandomWithPrefix("tf-acc-test")
+
+	const addr = "atlassian_jira_screen.test"
+	var screenID, tabID string
+
+	captureIDs := func(s *terraform.State) error {
+		rs, ok := s.RootModule().Resources[addr]
+		if !ok {
+			return fmt.Errorf("%s not found in state", addr)
+		}
+		screenID = rs.Primary.ID
+		tabID = rs.Primary.Attributes["default_tab_id"]
+		return nil
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testutil.ProtoV6ProviderFactories,
+		CheckDestroy:             testCheckScreenDestroyed,
+		Steps: []resource.TestStep{
+			{
+				Config: fmt.Sprintf(`
+resource "atlassian_jira_screen" "test" {
+  name        = %q
+  description = "Integration test screen (run %s)"
+}
+
+resource "atlassian_jira_screen_tab_fields" "test" {
+  screen_id = atlassian_jira_screen.test.id
+  tab_id    = atlassian_jira_screen.test.default_tab_id
+  fields    = ["summary", "description"]
+}
+`, rName, testutil.RunID()),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrSet(addr, "default_tab_id"),
+					resource.TestCheckResourceAttrPair("atlassian_jira_screen_tab_fields.test", "tab_id", addr, "default_tab_id"),
+					captureIDs,
+					testCheckJiraScreenOnlyTab(&screenID, &tabID),
+					testCheckJiraTabFields(&screenID, &tabID, "summary", "description"),
+				),
+			},
+			{
+				ResourceName:      addr,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+// testCheckJiraScreenOnlyTab reads the screen's tabs from Jira and checks that
+// the given tab is the only one.
+func testCheckJiraScreenOnlyTab(screenID, tabID *string) resource.TestCheckFunc {
+	return func(_ *terraform.State) error {
+		client, err := testutil.SweepClient()
+		if err != nil {
+			return fmt.Errorf("creating client: %w", err)
+		}
+		var tabs []struct {
+			ID int64 `json:"id"`
+		}
+		apiPath := fmt.Sprintf("/rest/api/3/screens/%s/tabs", *screenID)
+		if err := client.Get(context.Background(), apiPath, &tabs); err != nil {
+			return fmt.Errorf("reading screen tabs: %w", err)
+		}
+		if len(tabs) != 1 || fmt.Sprintf("%d", tabs[0].ID) != *tabID {
+			return fmt.Errorf("Jira lists the screen's tabs as %v, want only %s", tabs, *tabID)
+		}
+		return nil
+	}
+}
+
 func TestIntegrationScreenResource_update(t *testing.T) {
 	testutil.SkipIfNoAcc(t)
 	rName := acctest.RandomWithPrefix("tf-acc-test")

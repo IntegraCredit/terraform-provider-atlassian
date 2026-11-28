@@ -30,4 +30,5 @@ resource "atlassian_jira_screen" "example" {
 
 ### Read-Only
 
+- `default_tab_id` (String) The ID of the tab Jira adds to every new screen. Use it as `tab_id` to put fields on that tab rather than adding a second one with `atlassian_jira_screen_tab`. Set when the screen is created. An import sets it to the screen's first tab. It is null when that tab is deleted, and for screens created with an earlier version of the provider.
 - `id` (String) The ID of the screen.

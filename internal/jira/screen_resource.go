@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -31,9 +32,10 @@ type screenResource struct {
 }
 
 type screenResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Description types.String `tfsdk:"description"`
+	ID           types.String `tfsdk:"id"`
+	Name         types.String `tfsdk:"name"`
+	Description  types.String `tfsdk:"description"`
+	DefaultTabID types.String `tfsdk:"default_tab_id"`
 }
 
 // screenAPIResponse represents the Jira screen API response shape.
@@ -73,6 +75,16 @@ func (r *screenResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				Optional:    true,
 				Computed:    true,
 				Default:     stringdefault.StaticString(""),
+			},
+			"default_tab_id": schema.StringAttribute{
+				Description: "The ID of the tab Jira adds to every new screen. Use it as `tab_id` to put fields " +
+					"on that tab rather than adding a second one with `atlassian_jira_screen_tab`. Set when " +
+					"the screen is created. An import sets it to the screen's first tab. It is null when that " +
+					"tab is deleted, and for screens created with an earlier version of the provider.",
+				Computed: true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 		},
 	}
@@ -117,6 +129,20 @@ func (r *screenResource) Create(ctx context.Context, req resource.CreateRequest,
 	plan.ID = types.StringValue(fmt.Sprintf("%d", result.ID))
 	// Name and Description are preserved from the plan (user intent).
 
+	// Jira creates the screen with one tab. The screen already exists, so a failed read
+	// only warns: failing here would taint a screen that was created correctly.
+	plan.DefaultTabID = types.StringNull()
+	tabIDs, err := listScreenTabIDs(ctx, r.client, plan.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddWarning(
+			"Error reading the new screen's tabs",
+			fmt.Sprintf("Screen %s was created, but default_tab_id is unknown: %s. Remove the screen from the state and import it to set it.",
+				plan.ID.ValueString(), err),
+		)
+	} else if len(tabIDs) > 0 {
+		plan.DefaultTabID = types.StringValue(tabIDs[0])
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -141,6 +167,20 @@ func (r *screenResource) Read(ctx context.Context, req resource.ReadRequest, res
 	state.ID = types.StringValue(fmt.Sprintf("%d", screen.ID))
 	state.Name = types.StringValue(screen.Name)
 	state.Description = types.StringValue(screen.Description)
+
+	// The default tab is only known from create or import, so a null stays null. A recorded
+	// tab that is no longer on the screen becomes null, which shows the drift in every
+	// resource that uses it.
+	if !state.DefaultTabID.IsNull() && !state.DefaultTabID.IsUnknown() {
+		tabIDs, err := listScreenTabIDs(ctx, r.client, state.ID.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading screen tabs", err.Error())
+			return
+		}
+		if !slices.Contains(tabIDs, state.DefaultTabID.ValueString()) {
+			state.DefaultTabID = types.StringNull()
+		}
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -173,6 +213,9 @@ func (r *screenResource) Update(ctx context.Context, req resource.UpdateRequest,
 
 	// ID is carried forward from state (unchanged on update).
 	// Name and Description are preserved from the plan (user intent).
+	// A rename does not change the tabs. UseStateForUnknown leaves the plan unknown when
+	// the state is null, so take the state value.
+	plan.DefaultTabID = state.DefaultTabID
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -199,6 +242,40 @@ func (r *screenResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 func (r *screenResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Jira does not say which tab it created with the screen. The first tab is that tab
+	// unless someone moved or deleted it.
+	tabIDs, err := listScreenTabIDs(ctx, r.client, req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError("Error reading screen tabs", err.Error())
+		return
+	}
+	if len(tabIDs) > 0 {
+		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("default_tab_id"), tabIDs[0])...)
+	}
+}
+
+// listScreenTabIDs returns the IDs of a screen's tabs in Jira's order. A 404 returns none.
+func listScreenTabIDs(ctx context.Context, client *atlassian.Client, screenID string) ([]string, error) {
+	apiPath := fmt.Sprintf("/rest/api/3/screens/%s/tabs", atlassian.PathEscape(screenID))
+
+	var tabs []screenTabAPIResponse
+	statusCode, err := client.GetWithStatus(ctx, apiPath, &tabs)
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == http.StatusNotFound {
+		return nil, nil
+	}
+
+	tabIDs := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		tabIDs = append(tabIDs, fmt.Sprintf("%d", tab.ID))
+	}
+	return tabIDs, nil
 }
 
 // findScreenByID paginates GET /rest/api/3/screens and returns the screen with the given ID.
