@@ -18,10 +18,11 @@ type FakeScreenTabs struct {
 	t      testing.TB
 	server *httptest.Server
 
-	mu          sync.Mutex
-	fields      map[string][]string // "{screenID}/{tabID}" → field IDs in display order
-	writes      []string
-	ignoreMoves bool
+	mu              sync.Mutex
+	fields          map[string][]string // "{screenID}/{tabID}" → field IDs in display order
+	writes          []string
+	ignoreMoves     bool
+	reorderOnDelete func([]string) []string
 }
 
 // NewFakeScreenTabs starts the fake and stops it when the test ends.
@@ -71,6 +72,14 @@ func (f *FakeScreenTabs) IgnoreMoves() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ignoreMoves = true
+}
+
+// ReorderOnDelete makes the fake pass a tab's remaining fields through reorder
+// after each removal, the way Jira renumbers fields that share a position.
+func (f *FakeScreenTabs) ReorderOnDelete(reorder func([]string) []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reorderOnDelete = reorder
 }
 
 func (f *FakeScreenTabs) serve(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +142,11 @@ func (f *FakeScreenTabs) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"errorMessages":["The field was not found on the screen tab."]}`, http.StatusNotFound)
 			return
 		}
-		f.fields[key] = slices.Delete(current, i, i+1)
+		remaining := slices.Delete(current, i, i+1)
+		if f.reorderOnDelete != nil {
+			remaining = f.reorderOnDelete(slices.Clone(remaining))
+		}
+		f.fields[key] = remaining
 		f.writes = append(f.writes, "DELETE "+r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
 

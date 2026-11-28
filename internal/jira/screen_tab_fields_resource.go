@@ -248,11 +248,10 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 		want[fieldID] = true
 	}
 
-	working := make([]string, 0, len(desired))
 	onTab := make(map[string]bool, len(desired))
+	changed := false
 	for _, fieldID := range current {
 		if want[fieldID] {
-			working = append(working, fieldID)
 			onTab[fieldID] = true
 			continue
 		}
@@ -263,6 +262,7 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 			)
 			return
 		}
+		changed = true
 	}
 
 	for _, fieldID := range desired {
@@ -276,10 +276,35 @@ func (r *screenTabFieldsResource) apply(ctx context.Context, plan *screenTabFiel
 			)
 			return
 		}
-		working = append(working, fieldID)
+		changed = true
 	}
 
-	for _, move := range planScreenTabFieldMoves(working, desired) {
+	// Plan the moves from the order Jira lists after the removals and additions. Jira
+	// can reorder the fields it keeps: fields added to a tab in parallel can share a
+	// position, and removing another field renumbers them. With no writes, the first
+	// read still holds.
+	if changed {
+		current, found, err = r.readFields(ctx, screenID, tabID)
+		if err != nil {
+			diags.AddError("Error reading screen tab fields", err.Error())
+			return
+		}
+		if !found {
+			diags.AddError(
+				"Screen tab not found",
+				fmt.Sprintf("Jira found no tab %s on screen %s after changing its fields.", tabID, screenID),
+			)
+			return
+		}
+	}
+
+	// Moves only make sense when the tab holds exactly the configured fields. If
+	// someone else changed the tab in the meantime, send none: the check below reports it.
+	var moves []screenTabFieldMove
+	if sameFields(current, desired) {
+		moves = planScreenTabFieldMoves(current, desired)
+	}
+	for _, move := range moves {
 		body := screenTabFieldMoveRequest{After: move.After}
 		if move.After == "" {
 			body = screenTabFieldMoveRequest{Position: "First"}
@@ -336,6 +361,11 @@ func (r *screenTabFieldsResource) readFields(ctx context.Context, screenID, tabI
 		ids = append(ids, f.ID)
 	}
 	return ids, true, nil
+}
+
+// sameFields reports whether a and b hold the same field IDs, in any order.
+func sameFields(a, b []string) bool {
+	return slices.Equal(slices.Sorted(slices.Values(a)), slices.Sorted(slices.Values(b)))
 }
 
 // planScreenTabFieldMoves returns the fewest moves that turn current into desired.
