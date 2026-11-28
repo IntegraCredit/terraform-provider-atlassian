@@ -129,6 +129,86 @@ func TestScreenTabFieldsUpdate_Reconciles(t *testing.T) {
 	}
 }
 
+// TestScreenTabFieldsUpdate_JiraReordersOnRemove covers Jira changing the order of the
+// fields it keeps when it removes one. Fields added to a tab in parallel can share a
+// position, and a removal renumbers them. The moves must start from the order Jira
+// lists after the removals, so that one apply still ends in the configured order.
+func TestScreenTabFieldsUpdate_JiraReordersOnRemove(t *testing.T) {
+	fake := NewFakeScreenTabs(t)
+	prior := []string{"summary", "customfield_10016", "issuetype", "customfield_10020",
+		"customfield_10500", "customfield_10300", "customfield_10400"}
+	fake.SetFields(tabFieldsScreenID, tabFieldsTabID, prior...)
+	// The last three fields share a position, and each removal sorts them by ID.
+	tied := []string{"customfield_10300", "customfield_10400", "customfield_10500"}
+	fake.ReorderOnDelete(func(fields []string) []string {
+		var slots []int
+		var ids []string
+		for i, id := range fields {
+			if slices.Contains(tied, id) {
+				slots = append(slots, i)
+				ids = append(ids, id)
+			}
+		}
+		slices.Sort(ids)
+		for k, i := range slots {
+			fields[i] = ids[k]
+		}
+		return fields
+	})
+	r := newTabFieldsResource(t, fake)
+
+	want := []string{"summary", "issuetype", "customfield_10500", "customfield_10300", "customfield_10400"}
+	resp := updateTabFields(t, r, prior, want...)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("Update: %v", resp.Diagnostics)
+	}
+
+	if got := fake.Fields(tabFieldsScreenID, tabFieldsTabID); !slices.Equal(got, want) {
+		t.Errorf("tab fields = %q, want %q", got, want)
+	}
+	if got := stateFields(t, resp.State); !slices.Equal(got, want) {
+		t.Errorf("state fields = %q, want %q", got, want)
+	}
+
+	// The removals leave customfield_10300, customfield_10400, customfield_10500, so one move puts customfield_10500 back.
+	wantWrites := []string{
+		"DELETE " + tabFieldsPrefix + "/customfield_10016",
+		"DELETE " + tabFieldsPrefix + "/customfield_10020",
+		"POST " + tabFieldsPrefix + "/customfield_10500/move map[after:issuetype]",
+	}
+	if got := fake.Writes(); !slices.Equal(got, wantWrites) {
+		t.Errorf("writes =\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(wantWrites, "\n  "))
+	}
+}
+
+// TestScreenTabFieldsUpdate_TabChangedDuringApply sends no moves when, after the
+// removals and additions, the tab does not hold exactly the configured fields, and
+// reports what Jira lists.
+func TestScreenTabFieldsUpdate_TabChangedDuringApply(t *testing.T) {
+	fake := NewFakeScreenTabs(t)
+	fake.SetFields(tabFieldsScreenID, tabFieldsTabID, "summary", "labels", "description", "priority")
+	// Someone else adds a field to the tab while the apply runs.
+	fake.ReorderOnDelete(func(fields []string) []string {
+		return append(fields, "customfield_10099")
+	})
+	r := newTabFieldsResource(t, fake)
+
+	resp := updateTabFields(t, r, nil, "summary", "priority", "description")
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("Update succeeded, want an error about the fields")
+	}
+	if got := resp.Diagnostics.Errors()[0].Summary(); got != "Screen tab fields do not match the configuration" {
+		t.Errorf("error summary = %q", got)
+	}
+	wantWrites := []string{"DELETE " + tabFieldsPrefix + "/labels"}
+	if got := fake.Writes(); !slices.Equal(got, wantWrites) {
+		t.Errorf("writes = %q, want %q", got, wantWrites)
+	}
+	if got, want := stateFields(t, resp.State), []string{"summary", "description", "priority", "customfield_10099"}; !slices.Equal(got, want) {
+		t.Errorf("state fields = %q, want %q", got, want)
+	}
+}
+
 // TestScreenTabFieldsUpdate_UnchangedMakesNoWrites checks that a tab already in order costs only reads.
 func TestScreenTabFieldsUpdate_UnchangedMakesNoWrites(t *testing.T) {
 	fake := NewFakeScreenTabs(t)
