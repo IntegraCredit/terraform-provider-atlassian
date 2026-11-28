@@ -16,7 +16,9 @@ Manages the complete, ordered list of fields on a tab of a Jira Cloud screen. Th
 # Do not also manage this tab with atlassian_jira_screen_tab_field.
 resource "atlassian_jira_screen_tab_fields" "example" {
   screen_id = atlassian_jira_screen.example.id
-  tab_id    = atlassian_jira_screen_tab.example.id
+  # The tab Jira created with the screen. For a tab you added, use
+  # atlassian_jira_screen_tab.example.id.
+  tab_id = atlassian_jira_screen.example.default_tab_id
 
   fields = [
     "summary",
